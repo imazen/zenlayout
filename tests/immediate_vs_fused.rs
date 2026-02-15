@@ -577,7 +577,7 @@ fn constrain_then_crop_center() {
 
 #[test]
 fn constrain_then_crop_center_pixel_detail() {
-    // Detailed analysis of what goes wrong
+    // Post-constrain crop with nonzero origin: i32 placement handles negative offsets
     let src = Grid::source(10, 10);
     let commands = [
         Command::Constrain {
@@ -585,29 +585,7 @@ fn constrain_then_crop_center_pixel_detail() {
         },
         Command::Crop(SourceCrop::Pixels(Rect::new(3, 3, 4, 4))),
     ];
-
-    let immediate = immediate_eval(&src, &commands);
-    let fused = fused_eval(&src, &commands).unwrap();
-
-    eprintln!("constrain(identity)→crop(3,3,4,4) on 10x10:");
-    eprintln!("Immediate expects: source pixels (3,3)-(6,6)");
-    eprintln!("Immediate result:");
-    eprintln!("{}", immediate.summary());
-    eprintln!("Fused result:");
-    eprintln!("{}", fused.summary());
-
-    // Verify immediate shows the right pixels
-    assert_eq!(immediate.get(0, 0), Pixel::Source(3, 3));
-    assert_eq!(immediate.get(3, 3), Pixel::Source(6, 6));
-
-    // Fused shows wrong pixels due to u32 placement saturation
-    let fused_origin = fused.get(0, 0);
-    if fused_origin != Pixel::Source(3, 3) {
-        eprintln!(
-            "BUG CONFIRMED: fused origin is {:?}, expected Source(3,3)",
-            fused_origin
-        );
-    }
+    compare("constrain(identity)→crop(3,3,4,4)", &src, &commands);
 }
 
 #[test]
@@ -654,7 +632,7 @@ fn pad_region_then_constrain_downscale() {
 
 #[test]
 fn crop_constrain_crop() {
-    // Pre-constrain crop + post-constrain crop
+    // Pre-constrain crop + post-constrain crop: i32 placement handles the offset
     let src = Grid::source(20, 20);
     let commands = [
         Command::Crop(SourceCrop::Pixels(Rect::new(2, 2, 16, 16))),
@@ -663,11 +641,7 @@ fn crop_constrain_crop() {
         },
         Command::Crop(SourceCrop::Pixels(Rect::new(4, 4, 8, 8))),
     ];
-
-    let mismatch = compare_expect_mismatch("crop→constrain→crop(center)", &src, &commands);
-    if let Some(msg) = &mismatch {
-        eprintln!("EXPECTED MISMATCH: {msg}");
-    }
+    compare("crop→constrain→crop(center)", &src, &commands);
 }
 
 #[test]
@@ -686,16 +660,12 @@ fn constrain_then_region_viewport() {
             color: CanvasColor::Transparent,
         }),
     ];
-
-    let mismatch = compare_expect_mismatch("constrain→region(2,2,8,8)", &src, &commands);
-    if let Some(msg) = &mismatch {
-        eprintln!("EXPECTED MISMATCH (post-constrain region with nonzero origin): {msg}");
-    }
+    compare("constrain→region(2,2,8,8)", &src, &commands);
 }
 
 #[test]
 fn constrain_then_pad_then_crop() {
-    // Constrain → pad → crop the padded result
+    // Constrain → pad → crop the padded result: i32 placement handles the offset
     let src = Grid::source(20, 20);
     let commands = [
         Command::Constrain {
@@ -710,18 +680,33 @@ fn constrain_then_pad_then_crop() {
         },
         Command::Crop(SourceCrop::Pixels(Rect::new(2, 2, 16, 16))),
     ];
-
-    let mismatch = compare_expect_mismatch("constrain→pad→crop", &src, &commands);
-    if let Some(msg) = &mismatch {
-        eprintln!("EXPECTED MISMATCH: {msg}");
-    }
+    compare("constrain→pad→crop", &src, &commands);
 }
 
 // ---- Test: document ALL mismatches in one place ----
 
 #[test]
 fn audit_all_two_op_sequences() {
-    // Systematically test all interesting 2-op sequences
+    // Systematically test all interesting 2-op sequences.
+    //
+    // 3 remaining mismatches are inherent NN sampling grid artifacts:
+    //
+    // 1. constrain→rotate: Fused mode rotates source THEN resizes (single pass).
+    //    Immediate mode resizes THEN rotates. NN sampling from different grids
+    //    produces different pixel assignments. Dimensions always match.
+    //
+    // 2. pad→constrain: Fused mode resizes content separately from padding
+    //    (content is resize_to, padding is canvas-level). Immediate mode
+    //    composes padding into the pixel buffer, then resizes the combined
+    //    image. NN sampling at the content/padding boundary differs.
+    //    Dimensions always match.
+    //
+    // 3. region_pad→constrain: Same mechanism as pad→constrain. The Region
+    //    defines a padded viewport; fused mode decomposes it into content +
+    //    canvas placement.
+    //
+    // All 3 produce correct dimensions. With real resamplers (bilinear,
+    // lanczos) the pixel differences would be sub-pixel.
     let src = Grid::source(12, 12);
 
     let crop_a = Command::Crop(SourceCrop::Pixels(Rect::new(2, 2, 8, 8)));
@@ -765,13 +750,27 @@ fn audit_all_two_op_sequences() {
         ]),
     ];
 
+    // Known NN sampling grid mismatches (dimensions correct, pixels differ)
+    let expected_nn_mismatches = [
+        "constrain→rotate",
+        "pad→constrain",
+        "region_pad→constrain",
+    ];
+
     let mut matches = vec![];
-    let mut mismatches = vec![];
+    let mut nn_mismatches = vec![];
+    let mut unexpected = vec![];
 
     for (name, cmds) in &cases {
         match compare_expect_mismatch(name, &src, cmds) {
             None => matches.push(*name),
-            Some(msg) => mismatches.push(msg),
+            Some(msg) => {
+                if expected_nn_mismatches.contains(name) {
+                    nn_mismatches.push(msg);
+                } else {
+                    unexpected.push(msg);
+                }
+            }
         }
     }
 
@@ -780,9 +779,27 @@ fn audit_all_two_op_sequences() {
     for m in &matches {
         eprintln!("  ✓ {m}");
     }
-    eprintln!("\nMISMATCHES ({}):", mismatches.len());
-    for m in &mismatches {
-        eprintln!("  ✗ {m}");
+    eprintln!("\nNN SAMPLING MISMATCHES ({}, expected):", nn_mismatches.len());
+    for m in &nn_mismatches {
+        eprintln!("  ~ {m}");
     }
+
+    assert!(unexpected.is_empty(),
+        "Unexpected mismatches:\n{}",
+        unexpected.iter().map(|m| format!("  ✗ {m}")).collect::<Vec<_>>().join("\n")
+    );
+
+    // Verify dimension correctness for NN mismatches
+    for name in &expected_nn_mismatches {
+        let cmds = cases.iter().find(|(n, _)| n == name).unwrap();
+        let immediate = immediate_eval(&src, &cmds.1);
+        let fused = fused_eval(&src, &cmds.1).unwrap();
+        assert_eq!(
+            (immediate.width, immediate.height),
+            (fused.width, fused.height),
+            "{name}: dimensions must match even if pixels differ"
+        );
+    }
+
     eprintln!();
 }
