@@ -3632,4 +3632,279 @@ mod tests {
         assert_eq!(cl.mcu_cols, 1);
         assert_eq!(cl.mcu_rows, 1);
     }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Constraint interaction tests (min/max/align combinations)
+    // ════════════════════════════════════════════════════════════════════
+
+    // ── min + align interactions ────────────────────────────────────────
+
+    #[test]
+    fn limits_min_then_extend() {
+        // 100×50 within(100, 50) → resize=100×50, canvas=100×50
+        // min(200, 200) → scale = max(200/100, 200/50) = 4.0 → 400×200
+        // extend mod-16: 400 mod 16 = 0 (ok), 200 mod 16 = 8 → 400×208
+        // content_size = (400, 200)
+        let (ideal, _) = Pipeline::new(100, 50)
+            .within(100, 50)
+            .output_limits(OutputLimits {
+                min: Some(Size::new(200, 200)),
+                align: Some(Align::Extend(16, 16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(400, 208));
+        assert_eq!(ideal.content_size, Some(Size::new(400, 200)));
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 200));
+    }
+
+    #[test]
+    fn limits_min_then_crop_can_undo() {
+        // 100×50 within(100, 50) → canvas=100×50
+        // min(200, 200) → scale 4.0 → canvas=400×200
+        // crop mod-16: 400/16=25*16=400, 200/16=12*16=192
+        // Canvas drops to 400×192, which is below min_h=200.
+        // This is by design: align is applied AFTER min, may slightly violate.
+        let (ideal, _) = Pipeline::new(100, 50)
+            .within(100, 50)
+            .output_limits(OutputLimits {
+                min: Some(Size::new(200, 200)),
+                align: Some(Align::Crop(16, 16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(400, 192));
+        assert!(ideal.layout.canvas.height < 200); // crop undid min on y axis
+    }
+
+    #[test]
+    fn limits_min_then_distort_can_drop() {
+        // 100×50 within(100, 50) → canvas=100×50
+        // min(200, 200) → scale 4.0 → resize=400×200, canvas=400×200
+        // distort mod-16: round_nearest(400,16)=400, round_nearest(200,16)=192 (200+8=208, 208/16=13, 13*16=208 — wait...)
+        // round_to_nearest(v, n) = ((v + n/2) / n).max(1) * n
+        // round_to_nearest(200, 16) = ((200 + 8) / 16).max(1) * 16 = (208/16)*16 = 13*16 = 208
+        // So resize_to = 400×208, canvas = 400×208
+        let (ideal, _) = Pipeline::new(100, 50)
+            .within(100, 50)
+            .output_limits(OutputLimits {
+                min: Some(Size::new(200, 200)),
+                align: Some(Align::Distort(16, 16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 208));
+        assert_eq!(ideal.layout.canvas, Size::new(400, 208));
+    }
+
+    // ── max + align interactions ────────────────────────────────────────
+
+    #[test]
+    fn limits_max_then_crop() {
+        // 1000×1000 fit(1000, 1000) → canvas=1000×1000
+        // max(500, 500) → scale 0.5 → 500×500
+        // crop mod-16: 500/16=31*16=496, 500/16=31*16=496
+        // Crop only reduces: 496 < 500 ✓
+        let (ideal, _) = Pipeline::new(1000, 1000)
+            .fit(1000, 1000)
+            .output_limits(OutputLimits {
+                max: Some(Size::new(500, 500)),
+                align: Some(Align::Crop(16, 16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(496, 496));
+        assert!(ideal.layout.canvas.width <= 500);
+        assert!(ideal.layout.canvas.height <= 500);
+    }
+
+    #[test]
+    fn limits_max_then_distort_can_exceed() {
+        // 1000×1000 fit(1000, 1000) → canvas=1000×1000
+        // max(500, 500) → 500×500
+        // distort mod-16: round_nearest(500, 16) = ((500+8)/16)*16 = (508/16)*16 = 31*16 = 496
+        // Actually, 508/16 = 31.75, truncated to 31, 31*16 = 496. So 496×496.
+        let (ideal, _) = Pipeline::new(1000, 1000)
+            .fit(1000, 1000)
+            .output_limits(OutputLimits {
+                max: Some(Size::new(500, 500)),
+                align: Some(Align::Distort(16, 16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.resize_to.width % 16, 0);
+        assert_eq!(ideal.layout.resize_to.height % 16, 0);
+        // In this case distort rounds DOWN from 500 to 496
+        assert_eq!(ideal.layout.resize_to, Size::new(496, 496));
+    }
+
+    // ── three-way interactions ──────────────────────────────────────────
+
+    #[test]
+    fn limits_min_max_extend() {
+        // 100×50 within(100, 50) → canvas=100×50
+        // max(500, 500), min(200, 200) → min scale=4.0 → 400×200. Both within max ✓
+        // extend mod-16: 400 ok, 200→208. canvas=400×208
+        // content_size=(400, 200). Canvas exceeds max? 400<500, 208<500 → no.
+        let (ideal, _) = Pipeline::new(100, 50)
+            .within(100, 50)
+            .output_limits(OutputLimits {
+                max: Some(Size::new(500, 500)),
+                min: Some(Size::new(200, 200)),
+                align: Some(Align::Extend(16, 16)),
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(400, 208));
+        assert_eq!(ideal.content_size, Some(Size::new(400, 200)));
+        // Canvas extended past 200 on height, but content_size is within max
+        assert!(ideal.content_size.unwrap().width <= 500);
+        assert!(ideal.content_size.unwrap().height <= 500);
+    }
+
+    #[test]
+    fn limits_min_max_distort() {
+        // 100×50 within(100, 50) → canvas=100×50
+        // max(300, 300), min(200, 200) → min: scale=4.0→400×200
+        //   max re-apply: 400>300, scale=300/400=0.75 → 300×150
+        //   But 150<200 — max wins, min is violated.
+        // distort mod-16: round_nearest(300,16)=304, round_nearest(150,16)=144
+        //   ((300+8)/16)=19*16=304, ((150+8)/16)=9*16=144
+        let (ideal, _) = Pipeline::new(100, 50)
+            .within(100, 50)
+            .output_limits(OutputLimits {
+                max: Some(Size::new(300, 300)),
+                min: Some(Size::new(200, 200)),
+                align: Some(Align::Distort(16, 16)),
+            })
+            .plan()
+            .unwrap();
+        // Max won: ≤300. Distort may slightly exceed.
+        assert_eq!(ideal.layout.resize_to, Size::new(304, 144));
+        // 304 > 300: distort rounded UP past max (documented behavior)
+        assert!(ideal.layout.resize_to.width > 300);
+    }
+
+    // ── max == min ──────────────────────────────────────────────────────
+
+    #[test]
+    fn limits_max_equals_min_matching() {
+        // 100×100 within(100, 100) → canvas=100×100
+        // max=min=(200, 200) → min scale=2.0 → 200×200. Exactly at max too.
+        let (ideal, _) = Pipeline::new(100, 100)
+            .within(100, 100)
+            .output_limits(OutputLimits {
+                max: Some(Size::new(200, 200)),
+                min: Some(Size::new(200, 200)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(200, 200));
+    }
+
+    #[test]
+    fn limits_max_equals_min_mismatch() {
+        // 100×50 within(100, 50) → canvas=100×50
+        // max=min=(200, 200):
+        //   min: scale=max(200/100, 200/50)=4.0 → 400×200
+        //   max re-apply: 400>200, scale=min(200/400, 200/200)=0.5 → 200×100
+        //   Max wins: 200×100 (min violated on height)
+        let (ideal, _) = Pipeline::new(100, 50)
+            .within(100, 50)
+            .output_limits(OutputLimits {
+                max: Some(Size::new(200, 200)),
+                min: Some(Size::new(200, 200)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(200, 100));
+        // Max wins: canvas fits within max
+        assert!(ideal.layout.canvas.width <= 200);
+        assert!(ideal.layout.canvas.height <= 200);
+    }
+
+    // ── tiny image edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn limits_1x1_distort_large_align() {
+        // 1×1 fit(1, 1) → resize=1×1, canvas=1×1
+        // distort mod-16: round_nearest(1, 16) = ((1+8)/16).max(1)*16 = 1*16 = 16
+        let (ideal, _) = Pipeline::new(1, 1)
+            .fit(1, 1)
+            .output_limits(OutputLimits {
+                align: Some(Align::Distort(16, 16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.resize_to, Size::new(16, 16));
+        assert_eq!(ideal.layout.canvas, Size::new(16, 16));
+    }
+
+    #[test]
+    fn limits_1x1_extend() {
+        // 1×1 fit(1, 1) → resize=1×1, canvas=1×1
+        // extend mod-16: canvas→16×16, content_size=(1, 1)
+        let (ideal, _) = Pipeline::new(1, 1)
+            .fit(1, 1)
+            .output_limits(OutputLimits {
+                align: Some(Align::Extend(16, 16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(16, 16));
+        assert_eq!(ideal.content_size, Some(Size::new(1, 1)));
+        assert_eq!(ideal.layout.resize_to, Size::new(1, 1));
+    }
+
+    // ── other edge cases ───────────────────────────────────────────────
+
+    #[test]
+    fn limits_distort_padded_axis_detection() {
+        // FitPad where one axis is padded and one isn't.
+        // 800×200 fit_pad(400, 400) → resize=(400,100), canvas=(400,400)
+        // distort mod-16:
+        //   resize_to: round_nearest(400,16)=400 (already aligned), round_nearest(100,16)=96
+        //   Width: canvas.width==old_resize.width (400==400) → canvas follows → 400
+        //   Height: canvas.height(400) != old_resize.height(100) → pad mode → recenter
+        //     placement.1 = (400-96)/2 = 152
+        let (ideal, _) = Pipeline::new(800, 200)
+            .fit_pad(400, 400)
+            .output_limits(OutputLimits {
+                align: Some(Align::Distort(16, 16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 96));
+        assert_eq!(ideal.layout.canvas.width, 400); // width: non-pad, tracks resize
+        assert_eq!(ideal.layout.canvas.height, 400); // height: pad mode, stays
+        assert_eq!(ideal.layout.placement.1, 152); // recentered: (400-96)/2
+    }
+
+    #[test]
+    fn limits_crop_align_larger_than_canvas() {
+        // 3×3 fit(3, 3) → resize=3×3, canvas=3×3
+        // crop mod-16: (3/16).max(1)*16 = 1*16 = 16
+        // Crop with align > canvas rounds UP to 16 (by design, prevents zero)
+        let (ideal, _) = Pipeline::new(3, 3)
+            .fit(3, 3)
+            .output_limits(OutputLimits {
+                align: Some(Align::Crop(16, 16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(16, 16));
+        // resize_to clamped to canvas
+        assert_eq!(ideal.layout.resize_to, Size::new(3, 3));
+    }
 }
