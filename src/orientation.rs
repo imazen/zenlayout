@@ -4,8 +4,9 @@ use crate::constraint::{Rect, Size};
 
 /// Image orientation as an element of the D4 dihedral group.
 ///
-/// Represents a rotation (0, 90, 180, 270 degrees clockwise) optionally
-/// followed by a horizontal flip. All 8 EXIF orientations map to this.
+/// Every orientation decomposes into a rotation (0°/90°/180°/270° clockwise)
+/// optionally followed by a horizontal flip. All 8 EXIF orientations map
+/// one-to-one to these variants.
 ///
 /// The composition rule matches the D4 Cayley table verified against
 /// zenjpeg's `coeff_transform.rs`.
@@ -24,125 +25,148 @@ use crate::constraint::{Rect, Size};
 ///     │ F  │         │  F │         │  Ꟊ │         │ Ꟊ  │
 ///     └────┘         └────┘         └────┘         └────┘
 /// ```
+///
+/// # Decomposition
+///
+/// ```text
+/// | Orientation | = Rotation | + FlipH? | Swaps axes? |
+/// |-------------|------------|----------|-------------|
+/// | Identity    | 0°         | no       | no          |
+/// | FlipH       | 0°         | yes      | no          |
+/// | Rotate180   | 180°       | no       | no          |
+/// | FlipV       | 180°       | yes      | no          |
+/// | Transpose   | 90° CW     | yes      | yes         |
+/// | Rotate90    | 90° CW     | no       | yes         |
+/// | Transverse  | 270° CW    | yes      | yes         |
+/// | Rotate270   | 270° CW    | no       | yes         |
+/// ```
+#[non_exhaustive]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Orientation {
-    /// Rotation in 90-degree increments (0-3). 0=0°, 1=90°, 2=180°, 3=270°.
-    pub rotation: u8,
-    /// Horizontal flip applied after rotation.
-    pub flip: bool,
+pub enum Orientation {
+    /// No transformation. EXIF 1.
+    Identity,
+    /// Horizontal flip. EXIF 2.
+    FlipH,
+    /// 180° rotation. EXIF 3.
+    Rotate180,
+    /// Vertical flip (= Rotate180 + FlipH). EXIF 4.
+    FlipV,
+    /// Transpose: reflect over main diagonal (= Rotate90 + FlipH). EXIF 5. Swaps axes.
+    Transpose,
+    /// 90° clockwise rotation. EXIF 6. Swaps axes.
+    Rotate90,
+    /// Transverse: reflect over anti-diagonal (= Rotate270 + FlipH). EXIF 7. Swaps axes.
+    Transverse,
+    /// 270° clockwise rotation (90° counter-clockwise). EXIF 8. Swaps axes.
+    Rotate270,
 }
 
 impl Orientation {
-    /// Identity (no transformation). EXIF 1.
-    pub const IDENTITY: Self = Self {
-        rotation: 0,
-        flip: false,
-    };
-    /// Horizontal flip. EXIF 2.
-    pub const FLIP_H: Self = Self {
-        rotation: 0,
-        flip: true,
-    };
-    /// 180° rotation. EXIF 3.
-    pub const ROTATE_180: Self = Self {
-        rotation: 2,
-        flip: false,
-    };
-    /// Vertical flip. EXIF 4.
-    pub const FLIP_V: Self = Self {
-        rotation: 2,
-        flip: true,
-    };
-    /// Transpose (reflect over main diagonal). EXIF 5.
-    pub const TRANSPOSE: Self = Self {
-        rotation: 1,
-        flip: true,
-    };
-    /// 90° clockwise rotation. EXIF 6.
-    pub const ROTATE_90: Self = Self {
-        rotation: 1,
-        flip: false,
-    };
-    /// Transverse (reflect over anti-diagonal). EXIF 7.
-    pub const TRANSVERSE: Self = Self {
-        rotation: 3,
-        flip: true,
-    };
-    /// 270° clockwise rotation (90° counter-clockwise). EXIF 8.
-    pub const ROTATE_270: Self = Self {
-        rotation: 3,
-        flip: false,
-    };
-
     /// All 8 elements of the D4 group, indexed by EXIF value - 1.
     const ALL: [Self; 8] = [
-        Self::IDENTITY,
-        Self::FLIP_H,
-        Self::ROTATE_180,
-        Self::FLIP_V,
-        Self::TRANSPOSE,
-        Self::ROTATE_90,
-        Self::TRANSVERSE,
-        Self::ROTATE_270,
+        Self::Identity,
+        Self::FlipH,
+        Self::Rotate180,
+        Self::FlipV,
+        Self::Transpose,
+        Self::Rotate90,
+        Self::Transverse,
+        Self::Rotate270,
     ];
 
+    /// Decompose into `(rotation_quarters, flip)` for composition math.
+    ///
+    /// `rotation_quarters` is 0-3 (number of 90° CW steps).
+    /// `flip` is true if a horizontal flip follows the rotation.
+    const fn decompose(self) -> (u8, bool) {
+        match self {
+            Self::Identity => (0, false),
+            Self::FlipH => (0, true),
+            Self::Rotate90 => (1, false),
+            Self::Transpose => (1, true),
+            Self::Rotate180 => (2, false),
+            Self::FlipV => (2, true),
+            Self::Rotate270 => (3, false),
+            Self::Transverse => (3, true),
+        }
+    }
+
+    /// Reconstruct from `(rotation_quarters & 3, flip)`.
+    const fn from_rotation_flip(rotation: u8, flip: bool) -> Self {
+        match (rotation & 3, flip) {
+            (0, false) => Self::Identity,
+            (0, true) => Self::FlipH,
+            (1, false) => Self::Rotate90,
+            (1, true) => Self::Transpose,
+            (2, false) => Self::Rotate180,
+            (2, true) => Self::FlipV,
+            (3, false) => Self::Rotate270,
+            (3, true) => Self::Transverse,
+            _ => unreachable!(),
+        }
+    }
+
     /// Create from EXIF orientation tag (1-8). Returns `None` for invalid values.
-    pub fn from_exif(value: u8) -> Option<Self> {
-        if (1..=8).contains(&value) {
-            Some(Self::ALL[(value - 1) as usize])
-        } else {
-            None
+    pub const fn from_exif(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Identity),
+            2 => Some(Self::FlipH),
+            3 => Some(Self::Rotate180),
+            4 => Some(Self::FlipV),
+            5 => Some(Self::Transpose),
+            6 => Some(Self::Rotate90),
+            7 => Some(Self::Transverse),
+            8 => Some(Self::Rotate270),
+            _ => None,
         }
     }
 
     /// Convert to EXIF orientation tag (1-8).
-    pub fn to_exif(self) -> u8 {
-        // Search the ALL array for a match
-        for (i, &o) in Self::ALL.iter().enumerate() {
-            if o.rotation == self.rotation && o.flip == self.flip {
-                return (i + 1) as u8;
-            }
+    pub const fn to_exif(self) -> u8 {
+        match self {
+            Self::Identity => 1,
+            Self::FlipH => 2,
+            Self::Rotate180 => 3,
+            Self::FlipV => 4,
+            Self::Transpose => 5,
+            Self::Rotate90 => 6,
+            Self::Transverse => 7,
+            Self::Rotate270 => 8,
         }
-        // rotation is masked to 0-3 in compose, so this is reachable only
-        // if someone constructs an Orientation with rotation > 3
-        1
     }
 
     /// Whether this is the identity transformation.
-    pub fn is_identity(self) -> bool {
-        self.rotation == 0 && !self.flip
+    pub const fn is_identity(self) -> bool {
+        matches!(self, Self::Identity)
     }
 
     /// Whether this orientation swaps width and height.
-    pub fn swaps_axes(self) -> bool {
-        self.rotation % 2 == 1
+    pub const fn swaps_axes(self) -> bool {
+        matches!(
+            self,
+            Self::Transpose | Self::Rotate90 | Self::Transverse | Self::Rotate270
+        )
     }
 
     /// Compose two orientations: apply `self` first, then `other`.
     ///
     /// This follows the D4 group multiplication rule verified against
     /// the Cayley table in zenjpeg's `coeff_transform.rs`.
-    pub fn compose(self, other: Self) -> Self {
-        if !self.flip {
-            Self {
-                rotation: (self.rotation + other.rotation) & 3,
-                flip: other.flip,
-            }
+    pub const fn compose(self, other: Self) -> Self {
+        let (r1, f1) = self.decompose();
+        let (r2, f2) = other.decompose();
+        if !f1 {
+            Self::from_rotation_flip((r1 + r2) & 3, f2)
         } else {
-            Self {
-                rotation: (self.rotation.wrapping_sub(other.rotation)) & 3,
-                flip: !other.flip,
-            }
+            Self::from_rotation_flip(r1.wrapping_sub(r2) & 3, !f2)
         }
     }
 
-    /// The inverse orientation: `self.compose(self.inverse()) == IDENTITY`.
-    pub fn inverse(self) -> Self {
-        if !self.flip {
-            Self {
-                rotation: (4 - self.rotation) & 3,
-                flip: false,
-            }
+    /// The inverse orientation: `self.compose(self.inverse()) == Identity`.
+    pub const fn inverse(self) -> Self {
+        let (r, f) = self.decompose();
+        if !f {
+            Self::from_rotation_flip((4 - r) & 3, false)
         } else {
             // Flips are self-inverse, but rotation direction reverses under flip
             self
@@ -150,7 +174,7 @@ impl Orientation {
     }
 
     /// Transform source dimensions to display dimensions.
-    pub fn transform_dimensions(self, w: u32, h: u32) -> Size {
+    pub const fn transform_dimensions(self, w: u32, h: u32) -> Size {
         if self.swaps_axes() {
             Size::new(h, w)
         } else {
@@ -166,24 +190,15 @@ impl Orientation {
         let (rx, ry, rw, rh) = (rect.x, rect.y, rect.width, rect.height);
         let (sw, sh) = (source_w, source_h);
 
-        match (self.rotation, self.flip) {
-            // Identity
-            (0, false) => Rect::new(rx, ry, rw, rh),
-            // FlipH
-            (0, true) => Rect::new(sw - rx - rw, ry, rw, rh),
-            // Rotate90
-            (1, false) => Rect::new(ry, sh - rx - rw, rh, rw),
-            // Transpose
-            (1, true) => Rect::new(ry, rx, rh, rw),
-            // Rotate180
-            (2, false) => Rect::new(sw - rx - rw, sh - ry - rh, rw, rh),
-            // FlipV
-            (2, true) => Rect::new(rx, sh - ry - rh, rw, rh),
-            // Rotate270
-            (3, false) => Rect::new(sw - ry - rh, rx, rh, rw),
-            // Transverse
-            (3, true) => Rect::new(sw - ry - rh, sh - rx - rw, rh, rw),
-            _ => unreachable!(),
+        match self {
+            Self::Identity => Rect::new(rx, ry, rw, rh),
+            Self::FlipH => Rect::new(sw - rx - rw, ry, rw, rh),
+            Self::Rotate90 => Rect::new(ry, sh - rx - rw, rh, rw),
+            Self::Transpose => Rect::new(ry, rx, rh, rw),
+            Self::Rotate180 => Rect::new(sw - rx - rw, sh - ry - rh, rw, rh),
+            Self::FlipV => Rect::new(rx, sh - ry - rh, rw, rh),
+            Self::Rotate270 => Rect::new(sw - ry - rh, rx, rh, rw),
+            Self::Transverse => Rect::new(sw - ry - rh, sh - rx - rw, rh, rw),
         }
     }
 }
@@ -210,68 +225,68 @@ mod tests {
     #[test]
     fn exif_mapping_matches_spec() {
         // Verified against zenjpeg exif.rs:168-180
-        assert_eq!(Orientation::from_exif(1).unwrap(), Orientation::IDENTITY);
-        assert_eq!(Orientation::from_exif(2).unwrap(), Orientation::FLIP_H);
-        assert_eq!(Orientation::from_exif(3).unwrap(), Orientation::ROTATE_180);
-        assert_eq!(Orientation::from_exif(4).unwrap(), Orientation::FLIP_V);
-        assert_eq!(Orientation::from_exif(5).unwrap(), Orientation::TRANSPOSE);
-        assert_eq!(Orientation::from_exif(6).unwrap(), Orientation::ROTATE_90);
-        assert_eq!(Orientation::from_exif(7).unwrap(), Orientation::TRANSVERSE);
-        assert_eq!(Orientation::from_exif(8).unwrap(), Orientation::ROTATE_270);
+        assert_eq!(Orientation::from_exif(1).unwrap(), Orientation::Identity);
+        assert_eq!(Orientation::from_exif(2).unwrap(), Orientation::FlipH);
+        assert_eq!(Orientation::from_exif(3).unwrap(), Orientation::Rotate180);
+        assert_eq!(Orientation::from_exif(4).unwrap(), Orientation::FlipV);
+        assert_eq!(Orientation::from_exif(5).unwrap(), Orientation::Transpose);
+        assert_eq!(Orientation::from_exif(6).unwrap(), Orientation::Rotate90);
+        assert_eq!(Orientation::from_exif(7).unwrap(), Orientation::Transverse);
+        assert_eq!(Orientation::from_exif(8).unwrap(), Orientation::Rotate270);
     }
 
     #[test]
     fn identity_properties() {
-        assert!(Orientation::IDENTITY.is_identity());
-        assert!(!Orientation::FLIP_H.is_identity());
-        assert!(!Orientation::ROTATE_90.is_identity());
+        assert!(Orientation::Identity.is_identity());
+        assert!(!Orientation::FlipH.is_identity());
+        assert!(!Orientation::Rotate90.is_identity());
     }
 
     #[test]
     fn swaps_axes() {
-        assert!(!Orientation::IDENTITY.swaps_axes());
-        assert!(!Orientation::FLIP_H.swaps_axes());
-        assert!(!Orientation::ROTATE_180.swaps_axes());
-        assert!(!Orientation::FLIP_V.swaps_axes());
-        assert!(Orientation::TRANSPOSE.swaps_axes());
-        assert!(Orientation::ROTATE_90.swaps_axes());
-        assert!(Orientation::TRANSVERSE.swaps_axes());
-        assert!(Orientation::ROTATE_270.swaps_axes());
+        assert!(!Orientation::Identity.swaps_axes());
+        assert!(!Orientation::FlipH.swaps_axes());
+        assert!(!Orientation::Rotate180.swaps_axes());
+        assert!(!Orientation::FlipV.swaps_axes());
+        assert!(Orientation::Transpose.swaps_axes());
+        assert!(Orientation::Rotate90.swaps_axes());
+        assert!(Orientation::Transverse.swaps_axes());
+        assert!(Orientation::Rotate270.swaps_axes());
     }
 
     #[test]
     fn transform_dimensions() {
         use crate::constraint::Size;
         assert_eq!(
-            Orientation::IDENTITY.transform_dimensions(100, 200),
+            Orientation::Identity.transform_dimensions(100, 200),
             Size::new(100, 200)
         );
         assert_eq!(
-            Orientation::FLIP_H.transform_dimensions(100, 200),
+            Orientation::FlipH.transform_dimensions(100, 200),
             Size::new(100, 200)
         );
         assert_eq!(
-            Orientation::ROTATE_180.transform_dimensions(100, 200),
+            Orientation::Rotate180.transform_dimensions(100, 200),
             Size::new(100, 200)
         );
         assert_eq!(
-            Orientation::FLIP_V.transform_dimensions(100, 200),
+            Orientation::FlipV.transform_dimensions(100, 200),
             Size::new(100, 200)
         );
         assert_eq!(
-            Orientation::TRANSPOSE.transform_dimensions(100, 200),
+            Orientation::Transpose.transform_dimensions(100, 200),
             Size::new(200, 100)
         );
         assert_eq!(
-            Orientation::ROTATE_90.transform_dimensions(100, 200),
+            Orientation::Rotate90.transform_dimensions(100, 200),
             Size::new(200, 100)
         );
         assert_eq!(
-            Orientation::TRANSVERSE.transform_dimensions(100, 200),
+            Orientation::Transverse.transform_dimensions(100, 200),
             Size::new(200, 100)
         );
         assert_eq!(
-            Orientation::ROTATE_270.transform_dimensions(100, 200),
+            Orientation::Rotate270.transform_dimensions(100, 200),
             Size::new(200, 100)
         );
     }
@@ -303,14 +318,14 @@ mod tests {
 
         // zenjpeg index order to Orientation
         let zj_to_orient = [
-            Orientation::IDENTITY,   // 0 = None
-            Orientation::FLIP_H,     // 1 = FlipH
-            Orientation::FLIP_V,     // 2 = FlipV
-            Orientation::TRANSPOSE,  // 3 = Transpose
-            Orientation::ROTATE_90,  // 4 = Rotate90
-            Orientation::ROTATE_180, // 5 = Rotate180
-            Orientation::ROTATE_270, // 6 = Rotate270
-            Orientation::TRANSVERSE, // 7 = Transverse
+            Orientation::Identity,   // 0 = None
+            Orientation::FlipH,      // 1 = FlipH
+            Orientation::FlipV,      // 2 = FlipV
+            Orientation::Transpose,  // 3 = Transpose
+            Orientation::Rotate90,   // 4 = Rotate90
+            Orientation::Rotate180,  // 5 = Rotate180
+            Orientation::Rotate270,  // 6 = Rotate270
+            Orientation::Transverse, // 7 = Transverse
         ];
 
         for (i, row) in CAYLEY.iter().enumerate() {
@@ -334,13 +349,13 @@ mod tests {
             let inv = o.inverse();
             assert_eq!(
                 o.compose(inv),
-                Orientation::IDENTITY,
-                "{o:?}.compose({inv:?}) should be IDENTITY"
+                Orientation::Identity,
+                "{o:?}.compose({inv:?}) should be Identity"
             );
             assert_eq!(
                 inv.compose(o),
-                Orientation::IDENTITY,
-                "{inv:?}.compose({o:?}) should be IDENTITY"
+                Orientation::Identity,
+                "{inv:?}.compose({o:?}) should be Identity"
             );
         }
     }
@@ -364,7 +379,7 @@ mod tests {
 
     #[test]
     fn identity_is_neutral() {
-        let id = Orientation::IDENTITY;
+        let id = Orientation::Identity;
         for &o in &Orientation::ALL {
             assert_eq!(id.compose(o), o);
             assert_eq!(o.compose(id), o);
@@ -374,7 +389,7 @@ mod tests {
     #[test]
     fn transform_rect_identity() {
         let rect = Rect::new(10, 20, 30, 40);
-        let result = Orientation::IDENTITY.transform_rect_to_source(rect, 100, 200);
+        let result = Orientation::Identity.transform_rect_to_source(rect, 100, 200);
         assert_eq!(result, rect);
     }
 
@@ -470,7 +485,7 @@ mod tests {
         let rect = Rect::new(1, 1, 2, 2);
 
         // For identity: source rect is (1,1,2,2), display rect is same
-        let result = Orientation::IDENTITY.transform_rect_to_source(rect, sw, sh);
+        let result = Orientation::Identity.transform_rect_to_source(rect, sw, sh);
         assert_eq!(result, rect);
 
         // For all orientations: forward-map all 4 pixels in the 2x2 block,
@@ -501,16 +516,15 @@ mod tests {
     /// Forward-map a source pixel to display coordinates.
     /// Verified against zenjpeg coeff_transform.rs:89-97.
     fn forward_map_point(o: Orientation, x: u32, y: u32, w: u32, h: u32) -> (u32, u32) {
-        match (o.rotation, o.flip) {
-            (0, false) => (x, y),                 // Identity
-            (0, true) => (w - 1 - x, y),          // FlipH
-            (1, false) => (h - 1 - y, x),         // Rotate90
-            (1, true) => (y, x),                  // Transpose
-            (2, false) => (w - 1 - x, h - 1 - y), // Rotate180
-            (2, true) => (x, h - 1 - y),          // FlipV
-            (3, false) => (y, w - 1 - x),         // Rotate270
-            (3, true) => (h - 1 - y, w - 1 - x),  // Transverse
-            _ => unreachable!(),
+        match o {
+            Orientation::Identity => (x, y),
+            Orientation::FlipH => (w - 1 - x, y),
+            Orientation::Rotate90 => (h - 1 - y, x),
+            Orientation::Transpose => (y, x),
+            Orientation::Rotate180 => (w - 1 - x, h - 1 - y),
+            Orientation::FlipV => (x, h - 1 - y),
+            Orientation::Rotate270 => (y, w - 1 - x),
+            Orientation::Transverse => (h - 1 - y, w - 1 - x),
         }
     }
 }

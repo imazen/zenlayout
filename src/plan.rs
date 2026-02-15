@@ -138,7 +138,7 @@ impl DecoderOffer {
         Self {
             dimensions: Size::new(w, h),
             crop_applied: None,
-            orientation_applied: Orientation::IDENTITY,
+            orientation_applied: Orientation::Identity,
         }
     }
 }
@@ -599,7 +599,7 @@ impl Pipeline {
         Self {
             source_w,
             source_h,
-            orientation: Orientation::IDENTITY,
+            orientation: Orientation::Identity,
             crop: None,
             constraint: None,
             padding: None,
@@ -617,31 +617,31 @@ impl Pipeline {
 
     /// Rotate 90 degrees clockwise. Stacks with EXIF and other rotations.
     pub fn rotate_90(mut self) -> Self {
-        self.orientation = self.orientation.compose(Orientation::ROTATE_90);
+        self.orientation = self.orientation.compose(Orientation::Rotate90);
         self
     }
 
     /// Rotate 180 degrees. Stacks with EXIF and other rotations.
     pub fn rotate_180(mut self) -> Self {
-        self.orientation = self.orientation.compose(Orientation::ROTATE_180);
+        self.orientation = self.orientation.compose(Orientation::Rotate180);
         self
     }
 
     /// Rotate 270 degrees clockwise. Stacks with EXIF and other rotations.
     pub fn rotate_270(mut self) -> Self {
-        self.orientation = self.orientation.compose(Orientation::ROTATE_270);
+        self.orientation = self.orientation.compose(Orientation::Rotate270);
         self
     }
 
     /// Flip horizontally. Stacks with EXIF and other orientation commands.
     pub fn flip_h(mut self) -> Self {
-        self.orientation = self.orientation.compose(Orientation::FLIP_H);
+        self.orientation = self.orientation.compose(Orientation::FlipH);
         self
     }
 
     /// Flip vertically. Stacks with EXIF and other orientation commands.
     pub fn flip_v(mut self) -> Self {
-        self.orientation = self.orientation.compose(Orientation::FLIP_V);
+        self.orientation = self.orientation.compose(Orientation::FlipV);
         self
     }
 
@@ -943,7 +943,7 @@ pub fn compute_layout(
     source_h: u32,
     limits: Option<&OutputLimits>,
 ) -> Result<(IdealLayout, DecoderRequest), LayoutError> {
-    let mut orientation = Orientation::IDENTITY;
+    let mut orientation = Orientation::Identity;
     let mut crop: Option<&SourceCrop> = None;
     let mut constraint: Option<&Constraint> = None;
     let mut padding: Option<Padding> = None;
@@ -957,16 +957,16 @@ pub fn compute_layout(
             }
             Command::Rotate(r) => {
                 let o = match r {
-                    Rotation::Rotate90 => Orientation::ROTATE_90,
-                    Rotation::Rotate180 => Orientation::ROTATE_180,
-                    Rotation::Rotate270 => Orientation::ROTATE_270,
+                    Rotation::Rotate90 => Orientation::Rotate90,
+                    Rotation::Rotate180 => Orientation::Rotate180,
+                    Rotation::Rotate270 => Orientation::Rotate270,
                 };
                 orientation = orientation.compose(o);
             }
             Command::Flip(axis) => {
                 let o = match axis {
-                    FlipAxis::Horizontal => Orientation::FLIP_H,
-                    FlipAxis::Vertical => Orientation::FLIP_V,
+                    FlipAxis::Horizontal => Orientation::FlipH,
+                    FlipAxis::Vertical => Orientation::FlipV,
                 };
                 orientation = orientation.compose(o);
             }
@@ -1195,7 +1195,7 @@ mod tests {
     #[test]
     fn empty_commands_passthrough() {
         let (ideal, req) = compute_layout(&[], 800, 600, None).unwrap();
-        assert_eq!(ideal.orientation, Orientation::IDENTITY);
+        assert_eq!(ideal.orientation, Orientation::Identity);
         assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
         assert_eq!(ideal.layout.canvas, Size::new(800, 600));
         assert!(ideal.source_crop.is_none());
@@ -1216,18 +1216,18 @@ mod tests {
     fn auto_orient_90_swaps_dims() {
         let commands = [Command::AutoOrient(6)]; // EXIF 6 = Rotate90
         let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
-        assert_eq!(ideal.orientation, Orientation::ROTATE_90);
+        assert_eq!(ideal.orientation, Orientation::Rotate90);
         // Post-orientation: 800×600 rotated 90° → 600×800
         assert_eq!(ideal.layout.resize_to, Size::new(600, 800));
         assert_eq!(ideal.layout.canvas, Size::new(600, 800));
-        assert_eq!(req.orientation, Orientation::ROTATE_90);
+        assert_eq!(req.orientation, Orientation::Rotate90);
     }
 
     #[test]
     fn auto_orient_180_preserves_dims() {
         let commands = [Command::AutoOrient(3)]; // EXIF 3 = Rotate180
         let (ideal, _) = compute_layout(&commands, 800, 600, None).unwrap();
-        assert_eq!(ideal.orientation, Orientation::ROTATE_180);
+        assert_eq!(ideal.orientation, Orientation::Rotate180);
         assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
     }
 
@@ -1236,7 +1236,7 @@ mod tests {
         // EXIF 6 (Rotate90) + manual Rotate90 = Rotate180
         let commands = [Command::AutoOrient(6), Command::Rotate(Rotation::Rotate90)];
         let (ideal, _) = compute_layout(&commands, 800, 600, None).unwrap();
-        assert_eq!(ideal.orientation, Orientation::ROTATE_180);
+        assert_eq!(ideal.orientation, Orientation::Rotate180);
         // 180° doesn't swap: still 800×600
         assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
     }
@@ -1245,7 +1245,7 @@ mod tests {
     fn flip_horizontal() {
         let commands = [Command::Flip(FlipAxis::Horizontal)];
         let (ideal, _) = compute_layout(&commands, 800, 600, None).unwrap();
-        assert_eq!(ideal.orientation, Orientation::FLIP_H);
+        assert_eq!(ideal.orientation, Orientation::FlipH);
         // FlipH doesn't change dimensions
         assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
     }
@@ -1254,7 +1254,7 @@ mod tests {
     fn invalid_exif_ignored() {
         let commands = [Command::AutoOrient(0), Command::AutoOrient(9)];
         let (ideal, _) = compute_layout(&commands, 800, 600, None).unwrap();
-        assert_eq!(ideal.orientation, Orientation::IDENTITY);
+        assert_eq!(ideal.orientation, Orientation::Identity);
     }
 
     // ── Crop in oriented space ───────────────────────────────────────────
@@ -1377,7 +1377,7 @@ mod tests {
 
         assert!(plan.trim.is_none());
         assert_eq!(plan.resize_to, Size::new(400, 300));
-        assert_eq!(plan.remaining_orientation, Orientation::IDENTITY);
+        assert_eq!(plan.remaining_orientation, Orientation::Identity);
         assert_eq!(plan.canvas, Size::new(400, 300));
         assert!(!plan.resize_is_identity);
     }
@@ -1394,7 +1394,7 @@ mod tests {
         let offer = DecoderOffer::full_decode(800, 600);
         let plan = finalize(&ideal, &req, &offer);
 
-        assert_eq!(plan.remaining_orientation, Orientation::ROTATE_90);
+        assert_eq!(plan.remaining_orientation, Orientation::Rotate90);
         assert!(plan.trim.is_none());
     }
 
@@ -1411,11 +1411,11 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(600, 800),
             crop_applied: None,
-            orientation_applied: Orientation::ROTATE_90,
+            orientation_applied: Orientation::Rotate90,
         };
         let plan = finalize(&ideal, &req, &offer);
 
-        assert_eq!(plan.remaining_orientation, Orientation::IDENTITY);
+        assert_eq!(plan.remaining_orientation, Orientation::Identity);
     }
 
     #[test]
@@ -1429,7 +1429,7 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(208, 208),
             crop_applied: Some(Rect::new(96, 96, 208, 208)),
-            orientation_applied: Orientation::IDENTITY,
+            orientation_applied: Orientation::Identity,
         };
         let plan = finalize(&ideal, &req, &offer);
 
@@ -1462,7 +1462,7 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(400, 300),
             crop_applied: Some(Rect::new(0, 0, 400, 300)),
-            orientation_applied: Orientation::IDENTITY,
+            orientation_applied: Orientation::Identity,
         };
         let plan = finalize(&ideal, &req, &offer);
         assert!(plan.resize_is_identity);
@@ -1511,11 +1511,11 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(300, 400),
             crop_applied: req.crop,
-            orientation_applied: Orientation::ROTATE_90,
+            orientation_applied: Orientation::Rotate90,
         };
         let plan = finalize(&ideal, &req, &offer);
         assert!(plan.resize_is_identity);
-        assert_eq!(plan.remaining_orientation, Orientation::IDENTITY);
+        assert_eq!(plan.remaining_orientation, Orientation::Identity);
         assert!(plan.trim.is_none());
     }
 
@@ -1566,7 +1566,7 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(2000, 1500),
             crop_applied: None,
-            orientation_applied: Orientation::IDENTITY,
+            orientation_applied: Orientation::Identity,
         };
         let lp = finalize(&ideal, &req, &offer);
 
@@ -1586,7 +1586,7 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(500, 375),
             crop_applied: None,
-            orientation_applied: Orientation::IDENTITY,
+            orientation_applied: Orientation::Identity,
         };
         let lp = finalize(&ideal, &req, &offer);
         assert!(lp.resize_is_identity);
@@ -1603,7 +1603,7 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(500, 375),
             crop_applied: None,
-            orientation_applied: Orientation::IDENTITY,
+            orientation_applied: Orientation::Identity,
         };
         let (_, lp) = plan_finalize(
             &[Command::Constrain {
@@ -1632,7 +1632,7 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(224, 224),
             crop_applied: Some(Rect::new(96, 32, 224, 224)),
-            orientation_applied: Orientation::IDENTITY,
+            orientation_applied: Orientation::Identity,
         };
         let lp = finalize(&ideal, &req, &offer);
 
@@ -1653,7 +1653,7 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(104, 104),
             crop_applied: Some(Rect::new(48, 48, 104, 104)),
-            orientation_applied: Orientation::IDENTITY,
+            orientation_applied: Orientation::Identity,
         };
         let lp = finalize(&ideal, &req, &offer);
 
@@ -1672,7 +1672,7 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(104, 104),
             crop_applied: Some(Rect::new(696, 496, 104, 104)),
-            orientation_applied: Orientation::IDENTITY,
+            orientation_applied: Orientation::Identity,
         };
         let lp = finalize(&ideal, &req, &offer);
 
@@ -1690,17 +1690,17 @@ mod tests {
         // We want Rotate90 (EXIF 6), decoder applied Rotate180 instead
         let commands = [Command::AutoOrient(6)];
         let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
-        assert_eq!(ideal.orientation, Orientation::ROTATE_90);
+        assert_eq!(ideal.orientation, Orientation::Rotate90);
 
         let offer = DecoderOffer {
             dimensions: Size::new(800, 600), // 180° doesn't swap
             crop_applied: None,
-            orientation_applied: Orientation::ROTATE_180,
+            orientation_applied: Orientation::Rotate180,
         };
         let lp = finalize(&ideal, &req, &offer);
 
         // remaining = inverse(180°) ∘ 90° = 180° ∘ 90° = 270°
-        assert_eq!(lp.remaining_orientation, Orientation::ROTATE_270);
+        assert_eq!(lp.remaining_orientation, Orientation::Rotate270);
         // After remaining 270° on 800×600 → 600×800
         // Target was 600×800 (from 90° of 800×600)
         assert_eq!(lp.resize_to, Size::new(600, 800));
@@ -1716,12 +1716,12 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(800, 600), // FlipH doesn't swap
             crop_applied: None,
-            orientation_applied: Orientation::FLIP_H,
+            orientation_applied: Orientation::FlipH,
         };
         let lp = finalize(&ideal, &req, &offer);
 
         // remaining = inverse(FlipH) ∘ Rotate90 = FlipH ∘ Rotate90 = Transverse
-        assert_eq!(lp.remaining_orientation, Orientation::TRANSVERSE);
+        assert_eq!(lp.remaining_orientation, Orientation::Transverse);
         // Transpose swaps axes: 800×600 → 600×800 = target
         assert!(lp.resize_is_identity);
     }
@@ -1733,17 +1733,17 @@ mod tests {
         // We want Transverse (EXIF 7 = rot270 + flip), decoder only flipped
         let commands = [Command::AutoOrient(7)];
         let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
-        assert_eq!(ideal.orientation, Orientation::TRANSVERSE);
+        assert_eq!(ideal.orientation, Orientation::Transverse);
 
         let offer = DecoderOffer {
             dimensions: Size::new(800, 600),
             crop_applied: None,
-            orientation_applied: Orientation::FLIP_H,
+            orientation_applied: Orientation::FlipH,
         };
         let lp = finalize(&ideal, &req, &offer);
 
         // remaining = inverse(FlipH) ∘ Transverse = FlipH ∘ Transverse
-        let expected = Orientation::FLIP_H.compose(Orientation::TRANSVERSE);
+        let expected = Orientation::FlipH.compose(Orientation::Transverse);
         assert_eq!(lp.remaining_orientation, expected);
     }
 
@@ -1762,12 +1762,12 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(200, 300),
             crop_applied: req.crop,
-            orientation_applied: Orientation::ROTATE_90,
+            orientation_applied: Orientation::Rotate90,
         };
         let lp = finalize(&ideal, &req, &offer);
 
         assert!(lp.trim.is_none());
-        assert_eq!(lp.remaining_orientation, Orientation::IDENTITY);
+        assert_eq!(lp.remaining_orientation, Orientation::Identity);
         assert!(lp.resize_is_identity);
         assert_eq!(lp.resize_to, Size::new(200, 300));
     }
@@ -1785,11 +1785,11 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(600, 800),
             crop_applied: None,
-            orientation_applied: Orientation::ROTATE_90,
+            orientation_applied: Orientation::Rotate90,
         };
         let lp = finalize(&ideal, &req, &offer);
 
-        assert_eq!(lp.remaining_orientation, Orientation::IDENTITY);
+        assert_eq!(lp.remaining_orientation, Orientation::Identity);
         // Should still have a trim for the requested crop (now in source coords)
         assert!(lp.trim.is_some());
         let trim = lp.trim.unwrap();
@@ -1811,12 +1811,12 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(source_crop.width, source_crop.height),
             crop_applied: Some(source_crop),
-            orientation_applied: Orientation::IDENTITY,
+            orientation_applied: Orientation::Identity,
         };
         let lp = finalize(&ideal, &req, &offer);
 
         assert!(lp.trim.is_none()); // crop was exact
-        assert_eq!(lp.remaining_orientation, Orientation::ROTATE_90);
+        assert_eq!(lp.remaining_orientation, Orientation::Rotate90);
         // After remaining 90° on cropped dims → should match target
         let after = lp
             .remaining_orientation
@@ -1850,7 +1850,7 @@ mod tests {
         let lp = finalize(&ideal, &req, &offer);
 
         // Full orientation remains
-        assert_eq!(lp.remaining_orientation, Orientation::TRANSPOSE);
+        assert_eq!(lp.remaining_orientation, Orientation::Transpose);
         // Decoder output is full 800×600, needs crop → trim present
         assert!(lp.trim.is_some());
         assert!(!lp.resize_is_identity);
@@ -1884,7 +1884,7 @@ mod tests {
 
             assert_eq!(
                 lp.remaining_orientation,
-                Orientation::IDENTITY,
+                Orientation::Identity,
                 "EXIF {exif}: remaining should be identity when decoder handled it"
             );
             assert!(lp.trim.is_none());
@@ -1979,11 +1979,11 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(750, 1000), // 1/4 prescale + rotation
             crop_applied: None,
-            orientation_applied: Orientation::ROTATE_90,
+            orientation_applied: Orientation::Rotate90,
         };
         let lp = finalize(&ideal, &req, &offer);
 
-        assert_eq!(lp.remaining_orientation, Orientation::IDENTITY);
+        assert_eq!(lp.remaining_orientation, Orientation::Identity);
         assert_eq!(lp.resize_to, Size::new(375, 500));
         assert!(!lp.resize_is_identity); // 750×1000 → 375×500
     }
@@ -2003,11 +2003,11 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(1000, 750), // 1/4 prescale, no rotation
             crop_applied: None,
-            orientation_applied: Orientation::IDENTITY,
+            orientation_applied: Orientation::Identity,
         };
         let lp = finalize(&ideal, &req, &offer);
 
-        assert_eq!(lp.remaining_orientation, Orientation::ROTATE_90);
+        assert_eq!(lp.remaining_orientation, Orientation::Rotate90);
         // After 90° on 1000×750 → 750×1000
         // Target is 375×500 → not identity
         assert!(!lp.resize_is_identity);
@@ -2030,7 +2030,7 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(104, 104), // MCU-aligned crop, then 1/2 prescale
             crop_applied: Some(Rect::new(96, 96, 208, 208)),
-            orientation_applied: Orientation::IDENTITY,
+            orientation_applied: Orientation::Identity,
         };
         let lp = finalize(&ideal, &req, &offer);
 
@@ -2097,7 +2097,7 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(700, 500),
             crop_applied: Some(Rect::new(50, 50, 700, 500)),
-            orientation_applied: Orientation::IDENTITY,
+            orientation_applied: Orientation::Identity,
         };
         let lp = finalize(&ideal, &req, &offer);
 
@@ -2120,12 +2120,12 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(600, 800), // 270° swaps
             crop_applied: None,
-            orientation_applied: Orientation::ROTATE_270,
+            orientation_applied: Orientation::Rotate270,
         };
         let lp = finalize(&ideal, &req, &offer);
 
         // remaining = inverse(270°) ∘ 90° = 90° ∘ 90° = 180°
-        assert_eq!(lp.remaining_orientation, Orientation::ROTATE_180);
+        assert_eq!(lp.remaining_orientation, Orientation::Rotate180);
         // After 180° on 600×800 → 600×800 = target
         assert!(lp.resize_is_identity);
     }
@@ -2140,12 +2140,12 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(800, 600), // 180° doesn't swap
             crop_applied: None,
-            orientation_applied: Orientation::ROTATE_180,
+            orientation_applied: Orientation::Rotate180,
         };
         let lp = finalize(&ideal, &req, &offer);
 
         // remaining = inverse(180°) ∘ 90° = 180° ∘ 90° = 270°
-        assert_eq!(lp.remaining_orientation, Orientation::ROTATE_270);
+        assert_eq!(lp.remaining_orientation, Orientation::Rotate270);
         // 270° on 800×600 → 600×800 = target
         assert!(lp.resize_is_identity);
     }
@@ -2168,11 +2168,11 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(1000, 100),
             crop_applied: None,
-            orientation_applied: Orientation::ROTATE_90,
+            orientation_applied: Orientation::Rotate90,
         };
         let lp = finalize(&ideal, &req, &offer);
 
-        assert_eq!(lp.remaining_orientation, Orientation::IDENTITY);
+        assert_eq!(lp.remaining_orientation, Orientation::Identity);
         assert!(!lp.resize_is_identity);
         assert_eq!(lp.resize_to, Size::new(500, 50));
     }
@@ -2207,11 +2207,11 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(600, 800), // 270° swaps
             crop_applied: None,
-            orientation_applied: Orientation::ROTATE_270,
+            orientation_applied: Orientation::Rotate270,
         };
         let lp = finalize(&ideal, &req, &offer);
 
-        assert_eq!(lp.remaining_orientation, Orientation::IDENTITY);
+        assert_eq!(lp.remaining_orientation, Orientation::Identity);
         // Crop was in source coords; decoder didn't crop → trim = source crop
         assert!(lp.trim.is_some());
         assert!(!lp.resize_is_identity);
@@ -2231,7 +2231,7 @@ mod tests {
         let offer = DecoderOffer::full_decode(800, 600);
         let lp = finalize(&ideal, &req, &offer);
 
-        assert_eq!(lp.remaining_orientation, Orientation::ROTATE_270);
+        assert_eq!(lp.remaining_orientation, Orientation::Rotate270);
         assert!(lp.trim.is_some()); // crop not handled
         assert!(!lp.resize_is_identity);
     }
@@ -2252,11 +2252,11 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: target,
             crop_applied: req.crop,
-            orientation_applied: Orientation::ROTATE_270,
+            orientation_applied: Orientation::Rotate270,
         };
         let lp = finalize(&ideal, &req, &offer);
 
-        assert_eq!(lp.remaining_orientation, Orientation::IDENTITY);
+        assert_eq!(lp.remaining_orientation, Orientation::Identity);
         assert!(lp.trim.is_none());
         assert!(lp.resize_is_identity);
     }
@@ -2297,7 +2297,7 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(200, 200),
             crop_applied: Some(Rect::new(100, 100, 200, 200)),
-            orientation_applied: Orientation::IDENTITY,
+            orientation_applied: Orientation::Identity,
         };
         let lp = finalize(&ideal, &req, &offer);
 
@@ -2316,10 +2316,10 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(800, 600),
             crop_applied: None,
-            orientation_applied: Orientation::FLIP_H,
+            orientation_applied: Orientation::FlipH,
         };
         let lp = finalize(&ideal, &req, &offer);
-        assert_eq!(lp.remaining_orientation, Orientation::IDENTITY);
+        assert_eq!(lp.remaining_orientation, Orientation::Identity);
     }
 
     // ── FitPad with decoder prescale ─────────────────────────────────
@@ -2340,7 +2340,7 @@ mod tests {
         let offer = DecoderOffer {
             dimensions: Size::new(1000, 500),
             crop_applied: None,
-            orientation_applied: Orientation::IDENTITY,
+            orientation_applied: Orientation::Identity,
         };
         let lp = finalize(&ideal, &req, &offer);
 
@@ -2410,7 +2410,7 @@ mod tests {
             .rotate_90() // +90 = 180 total
             .plan()
             .unwrap();
-        assert_eq!(ideal.orientation, Orientation::ROTATE_180);
+        assert_eq!(ideal.orientation, Orientation::Rotate180);
         assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
     }
 
@@ -2418,7 +2418,7 @@ mod tests {
     fn pipeline_flip_h_and_v() {
         let (ideal, _) = Pipeline::new(800, 600).flip_h().flip_v().plan().unwrap();
         // FlipH then FlipV = Rotate180
-        assert_eq!(ideal.orientation, Orientation::ROTATE_180);
+        assert_eq!(ideal.orientation, Orientation::Rotate180);
     }
 
     #[test]
@@ -2510,7 +2510,7 @@ mod tests {
             .unwrap();
 
         let lp = ideal.finalize(&req, &DecoderOffer::full_decode(4000, 3000));
-        assert_eq!(lp.remaining_orientation, Orientation::ROTATE_90);
+        assert_eq!(lp.remaining_orientation, Orientation::Rotate90);
         assert!(lp.trim.is_some());
         assert!(!lp.resize_is_identity);
         // Canvas should be resize_to + 10 each dim
@@ -2567,14 +2567,14 @@ mod tests {
     #[test]
     fn pipeline_rotate_270() {
         let (ideal, _) = Pipeline::new(800, 600).rotate_270().plan().unwrap();
-        assert_eq!(ideal.orientation, Orientation::ROTATE_270);
+        assert_eq!(ideal.orientation, Orientation::Rotate270);
         assert_eq!(ideal.layout.resize_to, Size::new(600, 800));
     }
 
     #[test]
     fn pipeline_rotate_180() {
         let (ideal, _) = Pipeline::new(800, 600).rotate_180().plan().unwrap();
-        assert_eq!(ideal.orientation, Orientation::ROTATE_180);
+        assert_eq!(ideal.orientation, Orientation::Rotate180);
         assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
     }
 
@@ -2654,8 +2654,8 @@ mod tests {
 
         let (gm, gm_req) = sdr.derive_secondary(Size::new(4000, 3000), Size::new(1000, 750), None);
 
-        assert_eq!(gm.orientation, Orientation::ROTATE_90);
-        assert_eq!(gm_req.orientation, Orientation::ROTATE_90);
+        assert_eq!(gm.orientation, Orientation::Rotate90);
+        assert_eq!(gm_req.orientation, Orientation::Rotate90);
         // Oriented secondary: 750×1000 (rotated)
         assert_eq!(gm.layout.source, Size::new(750, 1000));
     }
@@ -2710,8 +2710,8 @@ mod tests {
         let gm_plan = gm.finalize(&gm_req, &DecoderOffer::full_decode(1000, 750));
 
         // Both should need the same remaining orientation
-        assert_eq!(sdr_plan.remaining_orientation, Orientation::ROTATE_90);
-        assert_eq!(gm_plan.remaining_orientation, Orientation::ROTATE_90);
+        assert_eq!(sdr_plan.remaining_orientation, Orientation::Rotate90);
+        assert_eq!(gm_plan.remaining_orientation, Orientation::Rotate90);
 
         // Both need trim (decoder didn't crop)
         assert!(sdr_plan.trim.is_some());
@@ -2739,7 +2739,7 @@ mod tests {
         let sdr_offer = DecoderOffer {
             dimensions: Size::new(2000, 2000),
             crop_applied: sdr_req.crop,
-            orientation_applied: Orientation::ROTATE_90,
+            orientation_applied: Orientation::Rotate90,
         };
         let sdr_plan = sdr.finalize(&sdr_req, &sdr_offer);
 
@@ -2749,11 +2749,11 @@ mod tests {
 
         // SDR: decoder did everything → no trim, no remaining orient
         assert!(sdr_plan.trim.is_none());
-        assert_eq!(sdr_plan.remaining_orientation, Orientation::IDENTITY);
+        assert_eq!(sdr_plan.remaining_orientation, Orientation::Identity);
 
         // Gain map: decoder did nothing → trim + orient remain
         assert!(gm_plan.trim.is_some());
-        assert_eq!(gm_plan.remaining_orientation, Orientation::ROTATE_90);
+        assert_eq!(gm_plan.remaining_orientation, Orientation::Rotate90);
 
         // But both produce spatially-locked output (same orientation effect)
     }
@@ -2776,7 +2776,7 @@ mod tests {
         let sdr_offer = DecoderOffer {
             dimensions: Size::new(208, 208),
             crop_applied: Some(Rect::new(96, 96, 208, 208)),
-            orientation_applied: Orientation::IDENTITY,
+            orientation_applied: Orientation::Identity,
         };
         let sdr_plan = sdr.finalize(&sdr_req, &sdr_offer);
 
@@ -2784,7 +2784,7 @@ mod tests {
         let gm_offer = DecoderOffer {
             dimensions: Size::new(56, 56),
             crop_applied: Some(Rect::new(24, 24, 56, 56)),
-            orientation_applied: Orientation::IDENTITY,
+            orientation_applied: Orientation::Identity,
         };
         let gm_plan = gm.finalize(&gm_req, &gm_offer);
 
@@ -2895,7 +2895,7 @@ mod tests {
 
         assert!(gm.source_crop.is_none());
         assert!(gm_req.crop.is_none());
-        assert_eq!(gm.orientation, Orientation::IDENTITY);
+        assert_eq!(gm.orientation, Orientation::Identity);
         assert_eq!(gm.layout.resize_to, Size::new(200, 150));
         assert_eq!(gm.layout.source, Size::new(200, 150));
     }
@@ -2915,21 +2915,21 @@ mod tests {
         let sdr_offer = DecoderOffer {
             dimensions: Size::new(1000, 1500),
             crop_applied: sdr_req.crop,
-            orientation_applied: Orientation::ROTATE_90,
+            orientation_applied: Orientation::Rotate90,
         };
         let sdr_plan = sdr.finalize(&sdr_req, &sdr_offer);
         assert!(sdr_plan.resize_is_identity);
-        assert_eq!(sdr_plan.remaining_orientation, Orientation::IDENTITY);
+        assert_eq!(sdr_plan.remaining_orientation, Orientation::Identity);
 
         // GM decoder handles everything too
         let gm_offer = DecoderOffer {
             dimensions: Size::new(gm.layout.resize_to.width, gm.layout.resize_to.height),
             crop_applied: gm_req.crop,
-            orientation_applied: Orientation::ROTATE_90,
+            orientation_applied: Orientation::Rotate90,
         };
         let gm_plan = gm.finalize(&gm_req, &gm_offer);
         assert!(gm_plan.resize_is_identity);
-        assert_eq!(gm_plan.remaining_orientation, Orientation::IDENTITY);
+        assert_eq!(gm_plan.remaining_orientation, Orientation::Identity);
     }
 
     #[test]
