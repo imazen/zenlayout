@@ -1,6 +1,6 @@
 //! Orientation (D4 dihedral group), EXIF mapping, and coordinate transforms.
 
-use crate::constraint::Rect;
+use crate::constraint::{Rect, Size};
 
 /// Image orientation as an element of the D4 dihedral group.
 ///
@@ -135,8 +135,12 @@ impl Orientation {
     }
 
     /// Transform source dimensions to display dimensions.
-    pub fn transform_dimensions(self, w: u32, h: u32) -> (u32, u32) {
-        if self.swaps_axes() { (h, w) } else { (w, h) }
+    pub fn transform_dimensions(self, w: u32, h: u32) -> Size {
+        if self.swaps_axes() {
+            Size::new(h, w)
+        } else {
+            Size::new(w, h)
+        }
     }
 
     /// Transform a rectangle from display coordinates back to source coordinates.
@@ -222,37 +226,38 @@ mod tests {
 
     #[test]
     fn transform_dimensions() {
+        use crate::constraint::Size;
         assert_eq!(
             Orientation::IDENTITY.transform_dimensions(100, 200),
-            (100, 200)
+            Size::new(100, 200)
         );
         assert_eq!(
             Orientation::FLIP_H.transform_dimensions(100, 200),
-            (100, 200)
+            Size::new(100, 200)
         );
         assert_eq!(
             Orientation::ROTATE_180.transform_dimensions(100, 200),
-            (100, 200)
+            Size::new(100, 200)
         );
         assert_eq!(
             Orientation::FLIP_V.transform_dimensions(100, 200),
-            (100, 200)
+            Size::new(100, 200)
         );
         assert_eq!(
             Orientation::TRANSPOSE.transform_dimensions(100, 200),
-            (200, 100)
+            Size::new(200, 100)
         );
         assert_eq!(
             Orientation::ROTATE_90.transform_dimensions(100, 200),
-            (200, 100)
+            Size::new(200, 100)
         );
         assert_eq!(
             Orientation::TRANSVERSE.transform_dimensions(100, 200),
-            (200, 100)
+            Size::new(200, 100)
         );
         assert_eq!(
             Orientation::ROTATE_270.transform_dimensions(100, 200),
-            (200, 100)
+            Size::new(200, 100)
         );
     }
 
@@ -362,8 +367,8 @@ mod tests {
     fn transform_rect_full_image() {
         // Full image rect should map to full source rect for all orientations
         for &o in &Orientation::ALL {
-            let (dw, dh) = o.transform_dimensions(100, 200);
-            let display_rect = Rect::new(0, 0, dw, dh);
+            let d = o.transform_dimensions(100, 200);
+            let display_rect = Rect::new(0, 0, d.width, d.height);
             let source_rect = o.transform_rect_to_source(display_rect, 100, 200);
             assert_eq!(
                 (source_rect.x, source_rect.y),
@@ -390,13 +395,15 @@ mod tests {
         ];
 
         for &o in &Orientation::ALL {
-            let (dw, dh) = o.transform_dimensions(sw, sh);
+            let d = o.transform_dimensions(sw, sh);
             for &(sx, sy) in &corners {
                 // Forward-map this source pixel to display coords
                 let (dx, dy) = forward_map_point(o, sx, sy, sw, sh);
                 assert!(
-                    dx < dw && dy < dh,
-                    "forward mapped ({sx},{sy}) to ({dx},{dy}) but display is {dw}x{dh} for {o:?}"
+                    dx < d.width && dy < d.height,
+                    "forward mapped ({sx},{sy}) to ({dx},{dy}) but display is {}x{} for {o:?}",
+                    d.width,
+                    d.height
                 );
 
                 // Now transform_rect_to_source should give us back the source pixel
@@ -421,7 +428,7 @@ mod tests {
         // Test every single-pixel rect in a 4x3 image
         let (sw, sh) = (4u32, 3u32);
         for &o in &Orientation::ALL {
-            let (dw, dh) = o.transform_dimensions(sw, sh);
+            let d = o.transform_dimensions(sw, sh);
             for sx in 0..sw {
                 for sy in 0..sh {
                     let (dx, dy) = forward_map_point(o, sx, sy, sw, sh);
@@ -430,7 +437,9 @@ mod tests {
                     assert_eq!(
                         (source_rect.x, source_rect.y),
                         (sx, sy),
-                        "pixel ({sx},{sy}) via {o:?}: display ({dx},{dy}) in {dw}x{dh}, got back ({},{})",
+                        "pixel ({sx},{sy}) via {o:?}: display ({dx},{dy}) in {}x{}, got back ({},{})",
+                        d.width,
+                        d.height,
                         source_rect.x,
                         source_rect.y
                     );

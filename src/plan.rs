@@ -5,7 +5,7 @@
 //! 2. [`finalize()`] — given what the decoder actually did ([`DecoderOffer`]), compute remaining work → [`LayoutPlan`]
 
 use crate::constraint::{
-    CanvasColor, Constraint, ConstraintMode, Layout, LayoutError, Rect, SourceCrop,
+    CanvasColor, Constraint, ConstraintMode, Layout, LayoutError, Rect, Size, SourceCrop,
 };
 use crate::orientation::Orientation;
 
@@ -73,7 +73,7 @@ pub struct IdealLayout {
     pub padding: Option<Padding>,
     /// If [`Align::Extend`] was used, crop to these dimensions after encoding.
     /// Canvas was extended with replicated edges; this records the real content size.
-    pub encode_crop: Option<(u32, u32)>,
+    pub encode_crop: Option<Size>,
 }
 
 /// Explicit padding specification.
@@ -97,7 +97,7 @@ pub struct DecoderRequest {
     /// Crop region in pre-orientation source coordinates.
     pub crop: Option<Rect>,
     /// Hint for prescale target dimensions.
-    pub prescale_target: (u32, u32),
+    pub prescale_target: Size,
     /// Orientation the engine would like the decoder to handle.
     pub orientation: Orientation,
 }
@@ -106,7 +106,7 @@ pub struct DecoderRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DecoderOffer {
     /// Dimensions of the decoded output.
-    pub dimensions: (u32, u32),
+    pub dimensions: Size,
     /// Crop the decoder applied (in source coordinates).
     pub crop_applied: Option<Rect>,
     /// Orientation the decoder applied.
@@ -117,7 +117,7 @@ impl DecoderOffer {
     /// Default offer: decoder did nothing special, just decoded at full size.
     pub fn full_decode(w: u32, h: u32) -> Self {
         Self {
-            dimensions: (w, h),
+            dimensions: Size::new(w, h),
             crop_applied: None,
             orientation_applied: Orientation::IDENTITY,
         }
@@ -132,11 +132,11 @@ pub struct LayoutPlan {
     /// Trim rect to apply to decoder output (for block-aligned overshoot).
     pub trim: Option<Rect>,
     /// Dimensions to resize to.
-    pub resize_to: (u32, u32),
+    pub resize_to: Size,
     /// Orientation remaining after decoder's contribution.
     pub remaining_orientation: Orientation,
     /// Final canvas dimensions (may be extended for alignment).
-    pub canvas: (u32, u32),
+    pub canvas: Size,
     /// Placement offset on canvas.
     pub placement: (u32, u32),
     /// Canvas background color.
@@ -145,7 +145,7 @@ pub struct LayoutPlan {
     pub resize_is_identity: bool,
     /// If [`Align::Extend`] was used, crop to these dimensions after encoding.
     /// Renderer should replicate edge pixels into the extension area.
-    pub encode_crop: Option<(u32, u32)>,
+    pub encode_crop: Option<Size>,
 }
 
 /// How to align output dimensions to codec-required multiples.
@@ -234,9 +234,9 @@ impl Subsampling {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PlaneLayout {
     /// Content dimensions in pixels.
-    pub content: (u32, u32),
+    pub content: Size,
     /// Allocated/encoded dimensions (extended to block boundary).
-    pub extended: (u32, u32),
+    pub extended: Size,
     /// Number of 8×8 blocks per row.
     pub blocks_w: u32,
     /// Number of 8×8 blocks per column.
@@ -252,7 +252,7 @@ pub struct PlaneLayout {
 /// # Example
 ///
 /// ```
-/// use zenlayout::{Pipeline, Subsampling, CodecLayout, MandatoryConstraints};
+/// use zenlayout::{Pipeline, Subsampling, CodecLayout, MandatoryConstraints, Size};
 ///
 /// let (ideal, _) = Pipeline::new(4000, 3000)
 ///     .fit(800, 600)
@@ -264,9 +264,9 @@ pub struct PlaneLayout {
 ///     .unwrap();
 ///
 /// let codec = CodecLayout::new(ideal.layout.canvas, Subsampling::S420);
-/// assert_eq!(codec.mcu_size, (16, 16));
+/// assert_eq!(codec.mcu_size, Size::new(16, 16));
 /// assert_eq!(codec.luma.extended, ideal.layout.canvas);
-/// assert_eq!(codec.chroma.extended, (400, 304));
+/// assert_eq!(codec.chroma.extended, Size::new(400, 304));
 /// // Feed resize output in chunks of codec.luma_rows_per_mcu rows
 /// assert_eq!(codec.luma_rows_per_mcu, 16);
 /// ```
@@ -279,7 +279,7 @@ pub struct CodecLayout {
     /// Subsampling scheme.
     pub subsampling: Subsampling,
     /// MCU dimensions in luma pixels.
-    pub mcu_size: (u32, u32),
+    pub mcu_size: Size,
     /// MCUs per row.
     pub mcu_cols: u32,
     /// MCU rows.
@@ -295,8 +295,8 @@ impl CodecLayout {
     /// Canvas should already be aligned (use [`Subsampling::mcu_align()`] with
     /// [`MandatoryConstraints`]). If not aligned, dimensions are rounded up
     /// internally.
-    pub fn new(canvas: (u32, u32), subsampling: Subsampling) -> Self {
-        let (w, h) = canvas;
+    pub fn new(canvas: Size, subsampling: Subsampling) -> Self {
+        let (w, h) = (canvas.width, canvas.height);
         let (h_factor, v_factor) = subsampling.factors();
         let (mcu_w, mcu_h) = subsampling.mcu_size();
 
@@ -308,8 +308,8 @@ impl CodecLayout {
         let mcu_rows = ext_h / mcu_h;
 
         let luma = PlaneLayout {
-            content: (w, h),
-            extended: (ext_w, ext_h),
+            content: Size::new(w, h),
+            extended: Size::new(ext_w, ext_h),
             blocks_w: ext_w / 8,
             blocks_h: ext_h / 8,
         };
@@ -320,8 +320,8 @@ impl CodecLayout {
         let chroma_ext_h = ext_h / v_factor;
 
         let chroma = PlaneLayout {
-            content: (chroma_content_w, chroma_content_h),
-            extended: (chroma_ext_w, chroma_ext_h),
+            content: Size::new(chroma_content_w, chroma_content_h),
+            extended: Size::new(chroma_ext_w, chroma_ext_h),
             blocks_w: chroma_ext_w / 8,
             blocks_h: chroma_ext_h / 8,
         };
@@ -330,7 +330,7 @@ impl CodecLayout {
             luma,
             chroma,
             subsampling,
-            mcu_size: (mcu_w, mcu_h),
+            mcu_size: Size::new(mcu_w, mcu_h),
             mcu_cols,
             mcu_rows,
             luma_rows_per_mcu: mcu_h,
@@ -352,9 +352,9 @@ impl CodecLayout {
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct MandatoryConstraints {
     /// Maximum canvas dimensions. If exceeded, everything scales down proportionally.
-    pub max: Option<(u32, u32)>,
+    pub max: Option<Size>,
     /// Minimum canvas dimensions. If below, everything scales up proportionally.
-    pub min: Option<(u32, u32)>,
+    pub min: Option<Size>,
     /// Snap canvas to multiples. See [`Align`] for round-down vs extend modes.
     pub align: Option<Align>,
 }
@@ -369,41 +369,47 @@ impl MandatoryConstraints {
     ///
     /// Order: max (cap canvas) → min (floor canvas) → align (snap canvas).
     /// Max wins if min conflicts.
-    pub fn apply(&self, layout: Layout) -> (Layout, Option<(u32, u32)>) {
+    pub fn apply(&self, layout: Layout) -> (Layout, Option<Size>) {
         let mut layout = layout;
 
         // 1. Max: if canvas exceeds max, scale everything down proportionally.
-        if let Some((max_w, max_h)) = self.max {
-            if max_w > 0 && max_h > 0 && (layout.canvas.0 > max_w || layout.canvas.1 > max_h) {
+        if let Some(max_sz) = self.max {
+            let (max_w, max_h) = (max_sz.width, max_sz.height);
+            if max_w > 0
+                && max_h > 0
+                && (layout.canvas.width > max_w || layout.canvas.height > max_h)
+            {
                 let scale = f64::min(
-                    max_w as f64 / layout.canvas.0 as f64,
-                    max_h as f64 / layout.canvas.1 as f64,
+                    max_w as f64 / layout.canvas.width as f64,
+                    max_h as f64 / layout.canvas.height as f64,
                 );
                 Self::scale_layout(&mut layout, scale);
             }
         }
 
         // 2. Min: if canvas is below min, scale everything up proportionally.
-        if let Some((min_w, min_h)) = self.min {
+        if let Some(min_sz) = self.min {
+            let (min_w, min_h) = (min_sz.width, min_sz.height);
             if min_w > 0
                 && min_h > 0
-                && (layout.canvas.0 < min_w || layout.canvas.1 < min_h)
+                && (layout.canvas.width < min_w || layout.canvas.height < min_h)
             {
                 let scale = f64::max(
-                    min_w as f64 / layout.canvas.0 as f64,
-                    min_h as f64 / layout.canvas.1 as f64,
+                    min_w as f64 / layout.canvas.width as f64,
+                    min_h as f64 / layout.canvas.height as f64,
                 );
                 Self::scale_layout(&mut layout, scale);
 
                 // Re-apply max if min pushed us past it (max wins).
-                if let Some((max_w, max_h)) = self.max {
+                if let Some(max_sz) = self.max {
+                    let (max_w, max_h) = (max_sz.width, max_sz.height);
                     if max_w > 0
                         && max_h > 0
-                        && (layout.canvas.0 > max_w || layout.canvas.1 > max_h)
+                        && (layout.canvas.width > max_w || layout.canvas.height > max_h)
                     {
                         let clamp = f64::min(
-                            max_w as f64 / layout.canvas.0 as f64,
-                            max_h as f64 / layout.canvas.1 as f64,
+                            max_w as f64 / layout.canvas.width as f64,
+                            max_h as f64 / layout.canvas.height as f64,
                         );
                         Self::scale_layout(&mut layout, clamp);
                     }
@@ -414,55 +420,77 @@ impl MandatoryConstraints {
         // 3. Align dimensions (per-axis).
         let encode_crop = match self.align {
             Some(Align::Crop(nx, ny)) if nx > 1 || ny > 1 => {
-                let cw = if nx > 1 { (layout.canvas.0 / nx).max(1) * nx } else { layout.canvas.0 };
-                let ch = if ny > 1 { (layout.canvas.1 / ny).max(1) * ny } else { layout.canvas.1 };
-                layout.canvas = (cw, ch);
+                let cw = if nx > 1 {
+                    (layout.canvas.width / nx).max(1) * nx
+                } else {
+                    layout.canvas.width
+                };
+                let ch = if ny > 1 {
+                    (layout.canvas.height / ny).max(1) * ny
+                } else {
+                    layout.canvas.height
+                };
+                layout.canvas = Size::new(cw, ch);
 
                 // resize_to can't exceed canvas.
-                layout.resize_to = (
-                    layout.resize_to.0.min(cw),
-                    layout.resize_to.1.min(ch),
+                layout.resize_to = Size::new(
+                    layout.resize_to.width.min(cw),
+                    layout.resize_to.height.min(ch),
                 );
 
                 // Clamp placement so image fits within canvas.
                 layout.placement = (
-                    layout.placement.0.min(cw.saturating_sub(layout.resize_to.0)),
-                    layout.placement.1.min(ch.saturating_sub(layout.resize_to.1)),
+                    layout
+                        .placement
+                        .0
+                        .min(cw.saturating_sub(layout.resize_to.width)),
+                    layout
+                        .placement
+                        .1
+                        .min(ch.saturating_sub(layout.resize_to.height)),
                 );
                 None
             }
             Some(Align::Extend(nx, ny)) if nx > 1 || ny > 1 => {
-                let (ow, oh) = layout.canvas;
+                let (ow, oh) = (layout.canvas.width, layout.canvas.height);
                 let cw = if nx > 1 { ow.div_ceil(nx) * nx } else { ow };
                 let ch = if ny > 1 { oh.div_ceil(ny) * ny } else { oh };
 
                 if cw != ow || ch != oh {
                     layout.placement = (0, 0);
-                    layout.canvas = (cw, ch);
-                    Some((ow, oh))
+                    layout.canvas = Size::new(cw, ch);
+                    Some(Size::new(ow, oh))
                 } else {
                     None // already aligned
                 }
             }
             Some(Align::Distort(nx, ny)) if nx > 1 || ny > 1 => {
                 let old_resize = layout.resize_to;
-                let rw = if nx > 1 { round_to_nearest(old_resize.0, nx) } else { old_resize.0 };
-                let rh = if ny > 1 { round_to_nearest(old_resize.1, ny) } else { old_resize.1 };
-                layout.resize_to = (rw, rh);
+                let rw = if nx > 1 {
+                    round_to_nearest(old_resize.width, nx)
+                } else {
+                    old_resize.width
+                };
+                let rh = if ny > 1 {
+                    round_to_nearest(old_resize.height, ny)
+                } else {
+                    old_resize.height
+                };
+                layout.resize_to = Size::new(rw, rh);
 
                 // Non-pad (canvas == old resize): canvas follows resize_to.
                 // Pad (canvas > old resize): keep canvas, recenter image.
-                if layout.canvas.0 == old_resize.0 {
-                    layout.canvas.0 = rw;
+                if layout.canvas.width == old_resize.width {
+                    layout.canvas.width = rw;
                     layout.placement.0 = 0;
                 } else {
-                    layout.placement.0 = (layout.canvas.0.saturating_sub(rw)) / 2;
+                    layout.placement.0 = (layout.canvas.width.saturating_sub(rw)) / 2;
                 }
-                if layout.canvas.1 == old_resize.1 {
-                    layout.canvas.1 = rh;
+                if layout.canvas.height == old_resize.height {
+                    layout.canvas.height = rh;
                     layout.placement.1 = 0;
                 } else {
-                    layout.placement.1 = (layout.canvas.1.saturating_sub(rh)) / 2;
+                    layout.placement.1 = (layout.canvas.height.saturating_sub(rh)) / 2;
                 }
                 None
             }
@@ -474,13 +502,13 @@ impl MandatoryConstraints {
 
     /// Scale all layout dimensions by a factor.
     fn scale_layout(layout: &mut Layout, scale: f64) {
-        layout.resize_to = (
-            (layout.resize_to.0 as f64 * scale).round().max(1.0) as u32,
-            (layout.resize_to.1 as f64 * scale).round().max(1.0) as u32,
+        layout.resize_to = Size::new(
+            (layout.resize_to.width as f64 * scale).round().max(1.0) as u32,
+            (layout.resize_to.height as f64 * scale).round().max(1.0) as u32,
         );
-        layout.canvas = (
-            (layout.canvas.0 as f64 * scale).round().max(1.0) as u32,
-            (layout.canvas.1 as f64 * scale).round().max(1.0) as u32,
+        layout.canvas = Size::new(
+            (layout.canvas.width as f64 * scale).round().max(1.0) as u32,
+            (layout.canvas.height as f64 * scale).round().max(1.0) as u32,
         );
         layout.placement = (
             (layout.placement.0 as f64 * scale).round() as u32,
@@ -729,7 +757,7 @@ impl IdealLayout {
     /// # Example
     ///
     /// ```
-    /// use zenlayout::{Pipeline, DecoderOffer};
+    /// use zenlayout::{Pipeline, DecoderOffer, Size};
     ///
     /// // SDR: 4000×3000, gain map: 1000×750 (1/4 scale)
     /// let (sdr_ideal, sdr_req) = Pipeline::new(4000, 3000)
@@ -741,8 +769,8 @@ impl IdealLayout {
     ///
     /// // Derive gain map plan from SDR plan
     /// let (gm_ideal, gm_req) = sdr_ideal.derive_secondary(
-    ///     (4000, 3000),     // primary source
-    ///     (1000, 750),      // gain map source
+    ///     Size::new(4000, 3000),     // primary source
+    ///     Size::new(1000, 750),      // gain map source
     ///     None,             // auto: 1/4 of SDR output
     /// );
     ///
@@ -755,33 +783,35 @@ impl IdealLayout {
     /// ```
     pub fn derive_secondary(
         &self,
-        primary_source: (u32, u32),
-        secondary_source: (u32, u32),
-        secondary_target: Option<(u32, u32)>,
+        primary_source: Size,
+        secondary_source: Size,
+        secondary_target: Option<Size>,
     ) -> (IdealLayout, DecoderRequest) {
-        let (ps_w, ps_h) = primary_source;
-        let (ss_w, ss_h) = secondary_source;
+        let (ps_w, ps_h) = (primary_source.width, primary_source.height);
+        let (ss_w, ss_h) = (secondary_source.width, secondary_source.height);
 
         // Scale ratios from primary source to secondary source.
         let scale_x = ss_w as f64 / ps_w as f64;
         let scale_y = ss_h as f64 / ps_h as f64;
 
         // Scale the source crop (in pre-orientation coords) with round-outward.
-        let secondary_crop = self.source_crop.map(|crop| {
-            scale_rect_outward(crop, scale_x, scale_y, ss_w, ss_h)
-        });
+        let secondary_crop = self
+            .source_crop
+            .map(|crop| scale_rect_outward(crop, scale_x, scale_y, ss_w, ss_h));
 
         // Compute the oriented secondary source dimensions.
-        let (sec_ow, sec_oh) = self.orientation.transform_dimensions(ss_w, ss_h);
+        let sec_o = self.orientation.transform_dimensions(ss_w, ss_h);
+        let (sec_ow, sec_oh) = (sec_o.width, sec_o.height);
 
         // Scale the layout's source crop (in post-orientation coords) with round-outward.
         // Use the oriented scale factors.
-        let orient_scale_x = sec_ow as f64 / self.layout.source.0 as f64;
-        let orient_scale_y = sec_oh as f64 / self.layout.source.1 as f64;
+        let orient_scale_x = sec_ow as f64 / self.layout.source.width as f64;
+        let orient_scale_y = sec_oh as f64 / self.layout.source.height as f64;
 
-        let secondary_layout_crop = self.layout.source_crop.map(|crop| {
-            scale_rect_outward(crop, orient_scale_x, orient_scale_y, sec_ow, sec_oh)
-        });
+        let secondary_layout_crop = self
+            .layout
+            .source_crop
+            .map(|crop| scale_rect_outward(crop, orient_scale_x, orient_scale_y, sec_ow, sec_oh));
 
         // Effective source after crop in oriented space.
         let (eff_w, eff_h) = match &secondary_layout_crop {
@@ -791,10 +821,10 @@ impl IdealLayout {
 
         // Compute target dimensions for the secondary plane.
         let (target_w, target_h) = match secondary_target {
-            Some(t) => t,
+            Some(t) => (t.width, t.height),
             None => {
                 // Auto: maintain source ratio relative to primary output.
-                let (pri_rw, pri_rh) = self.layout.resize_to;
+                let (pri_rw, pri_rh) = (self.layout.resize_to.width, self.layout.resize_to.height);
                 let tw = (pri_rw as f64 * scale_x).round().max(1.0) as u32;
                 let th = (pri_rh as f64 * scale_y).round().max(1.0) as u32;
                 (tw, th)
@@ -802,10 +832,10 @@ impl IdealLayout {
         };
 
         let sec_layout = Layout {
-            source: (sec_ow, sec_oh),
+            source: Size::new(sec_ow, sec_oh),
             source_crop: secondary_layout_crop,
-            resize_to: (target_w, target_h),
-            canvas: (target_w, target_h),
+            resize_to: Size::new(target_w, target_h),
+            canvas: Size::new(target_w, target_h),
             placement: (0, 0),
             canvas_color: CanvasColor::default(),
         };
@@ -824,7 +854,7 @@ impl IdealLayout {
 
         let sec_request = DecoderRequest {
             crop: secondary_crop,
-            prescale_target: (target_w, target_h),
+            prescale_target: Size::new(target_w, target_h),
             orientation: self.orientation,
         };
 
@@ -845,8 +875,12 @@ fn round_to_nearest(v: u32, n: u32) -> u32 {
 fn scale_rect_outward(rect: Rect, scale_x: f64, scale_y: f64, max_w: u32, max_h: u32) -> Rect {
     let x0 = (rect.x as f64 * scale_x).floor() as u32;
     let y0 = (rect.y as f64 * scale_y).floor() as u32;
-    let x1 = ((rect.x + rect.width) as f64 * scale_x).ceil().min(max_w as f64) as u32;
-    let y1 = ((rect.y + rect.height) as f64 * scale_y).ceil().min(max_h as f64) as u32;
+    let x1 = ((rect.x + rect.width) as f64 * scale_x)
+        .ceil()
+        .min(max_w as f64) as u32;
+    let y1 = ((rect.y + rect.height) as f64 * scale_y)
+        .ceil()
+        .min(max_h as f64) as u32;
     Rect::new(x0, y0, (x1 - x0).max(1), (y1 - y0).max(1))
 }
 
@@ -923,7 +957,15 @@ pub fn plan(
         }
     }
 
-    plan_from_parts(source_w, source_h, orientation, crop, constraint, padding, limits)
+    plan_from_parts(
+        source_w,
+        source_h,
+        orientation,
+        crop,
+        constraint,
+        padding,
+        limits,
+    )
 }
 
 /// Core layout computation shared by [`plan()`] and [`Pipeline::plan()`].
@@ -941,7 +983,8 @@ fn plan_from_parts(
     }
 
     // 1. Transform source dimensions to post-orientation space.
-    let (ow, oh) = orientation.transform_dimensions(source_w, source_h);
+    let oriented = orientation.transform_dimensions(source_w, source_h);
+    let (ow, oh) = (oriented.width, oriented.height);
 
     // 2. Compute layout in post-orientation space.
     let layout = if let Some(c) = constraint {
@@ -953,19 +996,19 @@ fn plan_from_parts(
     } else if let Some(sc) = crop {
         let rect = sc.resolve(ow, oh);
         Layout {
-            source: (ow, oh),
+            source: Size::new(ow, oh),
             source_crop: Some(rect),
-            resize_to: (rect.width, rect.height),
-            canvas: (rect.width, rect.height),
+            resize_to: Size::new(rect.width, rect.height),
+            canvas: Size::new(rect.width, rect.height),
             placement: (0, 0),
             canvas_color: CanvasColor::default(),
         }
     } else {
         Layout {
-            source: (ow, oh),
+            source: Size::new(ow, oh),
             source_crop: None,
-            resize_to: (ow, oh),
-            canvas: (ow, oh),
+            resize_to: Size::new(ow, oh),
+            canvas: Size::new(ow, oh),
             placement: (0, 0),
             canvas_color: CanvasColor::default(),
         }
@@ -974,14 +1017,11 @@ fn plan_from_parts(
     // 3. Apply explicit padding if present (additive on existing canvas).
     let layout = if let Some(pad) = &padding {
         Layout {
-            canvas: (
-                layout.canvas.0 + pad.left + pad.right,
-                layout.canvas.1 + pad.top + pad.bottom,
+            canvas: Size::new(
+                layout.canvas.width + pad.left + pad.right,
+                layout.canvas.height + pad.top + pad.bottom,
             ),
-            placement: (
-                layout.placement.0 + pad.left,
-                layout.placement.1 + pad.top,
-            ),
+            placement: (layout.placement.0 + pad.left, layout.placement.1 + pad.top),
             canvas_color: pad.color,
             ..layout
         }
@@ -1030,7 +1070,7 @@ pub fn finalize(ideal: &IdealLayout, request: &DecoderRequest, offer: &DecoderOf
         .compose(ideal.orientation);
 
     // 2. Compute trim rect if decoder didn't crop exactly what we asked.
-    let (decoder_w, decoder_h) = offer.dimensions;
+    let (decoder_w, decoder_h) = (offer.dimensions.width, offer.dimensions.height);
     let trim = compute_trim(&request.crop, &offer.crop_applied, decoder_w, decoder_h);
 
     // 3. Dimensions after trimming.
@@ -1040,11 +1080,11 @@ pub fn finalize(ideal: &IdealLayout, request: &DecoderRequest, offer: &DecoderOf
     };
 
     // 4. Dimensions after remaining orientation.
-    let (after_orient_w, after_orient_h) =
-        remaining_orientation.transform_dimensions(after_trim_w, after_trim_h);
+    let after_orient = remaining_orientation.transform_dimensions(after_trim_w, after_trim_h);
+    let (after_orient_w, after_orient_h) = (after_orient.width, after_orient.height);
 
     // 5. Target resize dimensions from the ideal layout.
-    let (target_w, target_h) = ideal.layout.resize_to;
+    let (target_w, target_h) = (ideal.layout.resize_to.width, ideal.layout.resize_to.height);
 
     // 6. Determine if resize is identity.
     let resize_is_identity = after_orient_w == target_w && after_orient_h == target_h;
@@ -1052,7 +1092,7 @@ pub fn finalize(ideal: &IdealLayout, request: &DecoderRequest, offer: &DecoderOf
     LayoutPlan {
         decoder_request: request.clone(),
         trim,
-        resize_to: (target_w, target_h),
+        resize_to: Size::new(target_w, target_h),
         remaining_orientation,
         canvas: ideal.layout.canvas,
         placement: ideal.layout.placement,
@@ -1107,12 +1147,12 @@ mod tests {
     fn empty_commands_passthrough() {
         let (ideal, req) = plan(&[], 800, 600, None).unwrap();
         assert_eq!(ideal.orientation, Orientation::IDENTITY);
-        assert_eq!(ideal.layout.resize_to, (800, 600));
-        assert_eq!(ideal.layout.canvas, (800, 600));
+        assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
+        assert_eq!(ideal.layout.canvas, Size::new(800, 600));
         assert!(ideal.source_crop.is_none());
         assert!(ideal.padding.is_none());
         assert!(req.crop.is_none());
-        assert_eq!(req.prescale_target, (800, 600));
+        assert_eq!(req.prescale_target, Size::new(800, 600));
     }
 
     #[test]
@@ -1129,8 +1169,8 @@ mod tests {
         let (ideal, req) = plan(&commands, 800, 600, None).unwrap();
         assert_eq!(ideal.orientation, Orientation::ROTATE_90);
         // Post-orientation: 800×600 rotated 90° → 600×800
-        assert_eq!(ideal.layout.resize_to, (600, 800));
-        assert_eq!(ideal.layout.canvas, (600, 800));
+        assert_eq!(ideal.layout.resize_to, Size::new(600, 800));
+        assert_eq!(ideal.layout.canvas, Size::new(600, 800));
         assert_eq!(req.orientation, Orientation::ROTATE_90);
     }
 
@@ -1139,7 +1179,7 @@ mod tests {
         let commands = [Command::AutoOrient(3)]; // EXIF 3 = Rotate180
         let (ideal, _) = plan(&commands, 800, 600, None).unwrap();
         assert_eq!(ideal.orientation, Orientation::ROTATE_180);
-        assert_eq!(ideal.layout.resize_to, (800, 600));
+        assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
     }
 
     #[test]
@@ -1149,7 +1189,7 @@ mod tests {
         let (ideal, _) = plan(&commands, 800, 600, None).unwrap();
         assert_eq!(ideal.orientation, Orientation::ROTATE_180);
         // 180° doesn't swap: still 800×600
-        assert_eq!(ideal.layout.resize_to, (800, 600));
+        assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
     }
 
     #[test]
@@ -1158,7 +1198,7 @@ mod tests {
         let (ideal, _) = plan(&commands, 800, 600, None).unwrap();
         assert_eq!(ideal.orientation, Orientation::FLIP_H);
         // FlipH doesn't change dimensions
-        assert_eq!(ideal.layout.resize_to, (800, 600));
+        assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
     }
 
     #[test]
@@ -1196,8 +1236,8 @@ mod tests {
     fn crop_only_no_constraint() {
         let commands = [Command::Crop(SourceCrop::pixels(10, 20, 100, 200))];
         let (ideal, _) = plan(&commands, 800, 600, None).unwrap();
-        assert_eq!(ideal.layout.resize_to, (100, 200));
-        assert_eq!(ideal.layout.canvas, (100, 200));
+        assert_eq!(ideal.layout.resize_to, Size::new(100, 200));
+        assert_eq!(ideal.layout.canvas, Size::new(100, 200));
         let crop = ideal.source_crop.unwrap();
         assert_eq!(crop, Rect::new(10, 20, 100, 200));
     }
@@ -1215,8 +1255,8 @@ mod tests {
         ];
         let (ideal, req) = plan(&commands, 800, 600, None).unwrap();
         // Fit 600×800 into 300×300 → 225×300
-        assert_eq!(ideal.layout.resize_to, (225, 300));
-        assert_eq!(req.prescale_target, (225, 300));
+        assert_eq!(ideal.layout.resize_to, Size::new(225, 300));
+        assert_eq!(req.prescale_target, Size::new(225, 300));
     }
 
     #[test]
@@ -1229,7 +1269,7 @@ mod tests {
             },
         ];
         let (ideal, _) = plan(&commands, 800, 600, None).unwrap();
-        assert_eq!(ideal.layout.resize_to, (200, 200));
+        assert_eq!(ideal.layout.resize_to, Size::new(200, 200));
         // Source crop should be present (from the explicit crop)
         assert!(ideal.source_crop.is_some());
     }
@@ -1246,8 +1286,8 @@ mod tests {
             color: CanvasColor::white(),
         }];
         let (ideal, _) = plan(&commands, 400, 300, None).unwrap();
-        assert_eq!(ideal.layout.resize_to, (400, 300));
-        assert_eq!(ideal.layout.canvas, (440, 320));
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 300));
+        assert_eq!(ideal.layout.canvas, Size::new(440, 320));
         assert_eq!(ideal.layout.placement, (20, 10));
         assert!(ideal.padding.is_some());
         let pad = ideal.padding.unwrap();
@@ -1270,8 +1310,8 @@ mod tests {
             },
         ];
         let (ideal, _) = plan(&commands, 800, 400, None).unwrap();
-        assert_eq!(ideal.layout.resize_to, (200, 100));
-        assert_eq!(ideal.layout.canvas, (210, 110));
+        assert_eq!(ideal.layout.resize_to, Size::new(200, 100));
+        assert_eq!(ideal.layout.canvas, Size::new(210, 110));
         assert_eq!(ideal.layout.placement, (5, 5));
     }
 
@@ -1287,9 +1327,9 @@ mod tests {
         let plan = finalize(&ideal, &req, &offer);
 
         assert!(plan.trim.is_none());
-        assert_eq!(plan.resize_to, (400, 300));
+        assert_eq!(plan.resize_to, Size::new(400, 300));
         assert_eq!(plan.remaining_orientation, Orientation::IDENTITY);
-        assert_eq!(plan.canvas, (400, 300));
+        assert_eq!(plan.canvas, Size::new(400, 300));
         assert!(!plan.resize_is_identity);
     }
 
@@ -1320,7 +1360,7 @@ mod tests {
         let (ideal, req) = plan(&commands, 800, 600, None).unwrap();
         // Decoder applied the rotation itself
         let offer = DecoderOffer {
-            dimensions: (600, 800),
+            dimensions: Size::new(600, 800),
             crop_applied: None,
             orientation_applied: Orientation::ROTATE_90,
         };
@@ -1338,7 +1378,7 @@ mod tests {
         assert_eq!(req.crop, Some(Rect::new(100, 100, 200, 200)));
 
         let offer = DecoderOffer {
-            dimensions: (208, 208),
+            dimensions: Size::new(208, 208),
             crop_applied: Some(Rect::new(96, 96, 208, 208)),
             orientation_applied: Orientation::IDENTITY,
         };
@@ -1371,7 +1411,7 @@ mod tests {
         let commands = [Command::Crop(SourceCrop::pixels(0, 0, 400, 300))];
         let (ideal, req) = plan(&commands, 800, 600, None).unwrap();
         let offer = DecoderOffer {
-            dimensions: (400, 300),
+            dimensions: Size::new(400, 300),
             crop_applied: Some(Rect::new(0, 0, 400, 300)),
             orientation_applied: Orientation::IDENTITY,
         };
@@ -1416,11 +1456,11 @@ mod tests {
         ];
         let (ideal, req) = plan(&commands, 800, 600, None).unwrap();
         // oriented = 600×800, crop 0,0,300,400 in oriented space
-        assert_eq!(ideal.layout.resize_to, (300, 400));
+        assert_eq!(ideal.layout.resize_to, Size::new(300, 400));
 
         // Decoder handles orientation and crop
         let offer = DecoderOffer {
-            dimensions: (300, 400),
+            dimensions: Size::new(300, 400),
             crop_applied: req.crop,
             orientation_applied: Orientation::ROTATE_90,
         };
@@ -1444,7 +1484,7 @@ mod tests {
         ];
         let (ideal, _) = plan(&commands, 800, 600, None).unwrap();
         // First constraint wins: Fit to 200×200
-        assert_eq!(ideal.layout.resize_to, (200, 150));
+        assert_eq!(ideal.layout.resize_to, Size::new(200, 150));
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -1472,17 +1512,17 @@ mod tests {
             constraint: Constraint::new(ConstraintMode::Fit, 500, 500),
         }];
         let (ideal, req) = plan(&commands, 4000, 3000, None).unwrap();
-        assert_eq!(ideal.layout.resize_to, (500, 375));
+        assert_eq!(ideal.layout.resize_to, Size::new(500, 375));
 
         let offer = DecoderOffer {
-            dimensions: (2000, 1500),
+            dimensions: Size::new(2000, 1500),
             crop_applied: None,
             orientation_applied: Orientation::IDENTITY,
         };
         let lp = finalize(&ideal, &req, &offer);
 
         assert!(lp.trim.is_none());
-        assert_eq!(lp.resize_to, (500, 375));
+        assert_eq!(lp.resize_to, Size::new(500, 375));
         // 2000×1500 → 500×375: still needs resize
         assert!(!lp.resize_is_identity);
     }
@@ -1495,7 +1535,7 @@ mod tests {
         }];
         let (ideal, req) = plan(&commands, 4000, 3000, None).unwrap();
         let offer = DecoderOffer {
-            dimensions: (500, 375),
+            dimensions: Size::new(500, 375),
             crop_applied: None,
             orientation_applied: Orientation::IDENTITY,
         };
@@ -1512,7 +1552,7 @@ mod tests {
         let (_, req) = plan(&commands, 4000, 3000, None).unwrap();
         // Decoder only managed 1/8 but dimensions don't match target
         let offer = DecoderOffer {
-            dimensions: (500, 375),
+            dimensions: Size::new(500, 375),
             crop_applied: None,
             orientation_applied: Orientation::IDENTITY,
         };
@@ -1526,7 +1566,7 @@ mod tests {
         );
         // target is 500×375, decoder output is 500×375 → identity
         assert!(lp.resize_is_identity);
-        assert_eq!(lp.resize_to, (500, 375));
+        assert_eq!(lp.resize_to, Size::new(500, 375));
         let _ = req; // used above
     }
 
@@ -1541,7 +1581,7 @@ mod tests {
         assert_eq!(req.crop.unwrap(), Rect::new(103, 47, 200, 200));
 
         let offer = DecoderOffer {
-            dimensions: (224, 224),
+            dimensions: Size::new(224, 224),
             crop_applied: Some(Rect::new(96, 32, 224, 224)),
             orientation_applied: Orientation::IDENTITY,
         };
@@ -1562,7 +1602,7 @@ mod tests {
         let (ideal, req) = plan(&commands, 400, 300, None).unwrap();
 
         let offer = DecoderOffer {
-            dimensions: (104, 104),
+            dimensions: Size::new(104, 104),
             crop_applied: Some(Rect::new(48, 48, 104, 104)),
             orientation_applied: Orientation::IDENTITY,
         };
@@ -1581,7 +1621,7 @@ mod tests {
         let (ideal, req) = plan(&commands, 800, 600, None).unwrap();
 
         let offer = DecoderOffer {
-            dimensions: (104, 104),
+            dimensions: Size::new(104, 104),
             crop_applied: Some(Rect::new(696, 496, 104, 104)),
             orientation_applied: Orientation::IDENTITY,
         };
@@ -1604,7 +1644,7 @@ mod tests {
         assert_eq!(ideal.orientation, Orientation::ROTATE_90);
 
         let offer = DecoderOffer {
-            dimensions: (800, 600), // 180° doesn't swap
+            dimensions: Size::new(800, 600), // 180° doesn't swap
             crop_applied: None,
             orientation_applied: Orientation::ROTATE_180,
         };
@@ -1614,7 +1654,7 @@ mod tests {
         assert_eq!(lp.remaining_orientation, Orientation::ROTATE_270);
         // After remaining 270° on 800×600 → 600×800
         // Target was 600×800 (from 90° of 800×600)
-        assert_eq!(lp.resize_to, (600, 800));
+        assert_eq!(lp.resize_to, Size::new(600, 800));
         assert!(lp.resize_is_identity);
     }
 
@@ -1625,7 +1665,7 @@ mod tests {
         let (ideal, req) = plan(&commands, 800, 600, None).unwrap();
 
         let offer = DecoderOffer {
-            dimensions: (800, 600), // FlipH doesn't swap
+            dimensions: Size::new(800, 600), // FlipH doesn't swap
             crop_applied: None,
             orientation_applied: Orientation::FLIP_H,
         };
@@ -1647,7 +1687,7 @@ mod tests {
         assert_eq!(ideal.orientation, Orientation::TRANSVERSE);
 
         let offer = DecoderOffer {
-            dimensions: (800, 600),
+            dimensions: Size::new(800, 600),
             crop_applied: None,
             orientation_applied: Orientation::FLIP_H,
         };
@@ -1671,7 +1711,7 @@ mod tests {
 
         // Decoder did everything: oriented + cropped
         let offer = DecoderOffer {
-            dimensions: (200, 300),
+            dimensions: Size::new(200, 300),
             crop_applied: req.crop,
             orientation_applied: Orientation::ROTATE_90,
         };
@@ -1680,7 +1720,7 @@ mod tests {
         assert!(lp.trim.is_none());
         assert_eq!(lp.remaining_orientation, Orientation::IDENTITY);
         assert!(lp.resize_is_identity);
-        assert_eq!(lp.resize_to, (200, 300));
+        assert_eq!(lp.resize_to, Size::new(200, 300));
     }
 
     #[test]
@@ -1694,7 +1734,7 @@ mod tests {
 
         // Decoder rotated (swapped dims) but didn't crop
         let offer = DecoderOffer {
-            dimensions: (600, 800),
+            dimensions: Size::new(600, 800),
             crop_applied: None,
             orientation_applied: Orientation::ROTATE_90,
         };
@@ -1720,7 +1760,7 @@ mod tests {
 
         // Decoder cropped exactly in source coords but didn't orient
         let offer = DecoderOffer {
-            dimensions: (source_crop.width, source_crop.height),
+            dimensions: Size::new(source_crop.width, source_crop.height),
             crop_applied: Some(source_crop),
             orientation_applied: Orientation::IDENTITY,
         };
@@ -1729,10 +1769,10 @@ mod tests {
         assert!(lp.trim.is_none()); // crop was exact
         assert_eq!(lp.remaining_orientation, Orientation::ROTATE_90);
         // After remaining 90° on cropped dims → should match target
-        let (after_w, after_h) = lp
+        let after = lp
             .remaining_orientation
             .transform_dimensions(source_crop.width, source_crop.height);
-        assert_eq!((after_w, after_h), lp.resize_to);
+        assert_eq!(after, lp.resize_to);
         assert!(lp.resize_is_identity);
     }
 
@@ -1766,8 +1806,8 @@ mod tests {
         assert!(lp.trim.is_some());
         assert!(!lp.resize_is_identity);
         // Canvas includes padding
-        assert!(lp.canvas.0 > lp.resize_to.0);
-        assert!(lp.canvas.1 > lp.resize_to.1);
+        assert!(lp.canvas.width > lp.resize_to.width);
+        assert!(lp.canvas.height > lp.resize_to.height);
     }
 
     // ── All 8 EXIF orientations: decoder handles vs doesn't ──────────
@@ -1785,9 +1825,9 @@ mod tests {
             let (ideal, req) = plan(&commands, 800, 600, None).unwrap();
 
             // Decoder applied the orientation
-            let (dw, dh) = orientation.transform_dimensions(800, 600);
+            let dims = orientation.transform_dimensions(800, 600);
             let offer = DecoderOffer {
-                dimensions: (dw, dh),
+                dimensions: dims,
                 crop_applied: None,
                 orientation_applied: orientation,
             };
@@ -1818,10 +1858,9 @@ mod tests {
                 "EXIF {exif}: remaining should be the full orientation"
             );
             // For orient-only, after remaining orient the dims should match
-            let (after_w, after_h) = lp.remaining_orientation.transform_dimensions(800, 600);
+            let after = lp.remaining_orientation.transform_dimensions(800, 600);
             assert_eq!(
-                (after_w, after_h),
-                lp.resize_to,
+                after, lp.resize_to,
                 "EXIF {exif}: post-orient dims should match resize target"
             );
             assert!(
@@ -1837,8 +1876,8 @@ mod tests {
     fn one_pixel_image_passthrough() {
         let (_, lp) = plan_finalize(&[], 1, 1, &DecoderOffer::full_decode(1, 1));
         assert!(lp.resize_is_identity);
-        assert_eq!(lp.resize_to, (1, 1));
-        assert_eq!(lp.canvas, (1, 1));
+        assert_eq!(lp.resize_to, Size::new(1, 1));
+        assert_eq!(lp.canvas, Size::new(1, 1));
     }
 
     #[test]
@@ -1847,7 +1886,7 @@ mod tests {
         let (_, lp) = plan_finalize(&commands, 1, 1, &DecoderOffer::full_decode(1, 1));
         // 1×1 rotated is still 1×1
         assert!(lp.resize_is_identity);
-        assert_eq!(lp.resize_to, (1, 1));
+        assert_eq!(lp.resize_to, Size::new(1, 1));
     }
 
     #[test]
@@ -1857,7 +1896,7 @@ mod tests {
             constraint: Constraint::new(ConstraintMode::Fit, 100, 100),
         }];
         let (_, lp) = plan_finalize(&commands, 1, 1, &DecoderOffer::full_decode(1, 1));
-        assert_eq!(lp.resize_to, (100, 100));
+        assert_eq!(lp.resize_to, Size::new(100, 100));
         assert!(!lp.resize_is_identity);
     }
 
@@ -1868,7 +1907,7 @@ mod tests {
             constraint: Constraint::new(ConstraintMode::Within, 100, 100),
         }];
         let (_, lp) = plan_finalize(&commands, 1, 1, &DecoderOffer::full_decode(1, 1));
-        assert_eq!(lp.resize_to, (1, 1));
+        assert_eq!(lp.resize_to, Size::new(1, 1));
         assert!(lp.resize_is_identity);
     }
 
@@ -1886,17 +1925,17 @@ mod tests {
         ];
         let (ideal, req) = plan(&commands, 4000, 3000, None).unwrap();
         // Oriented: 3000×4000, fit to 500×500 → 375×500
-        assert_eq!(ideal.layout.resize_to, (375, 500));
+        assert_eq!(ideal.layout.resize_to, Size::new(375, 500));
 
         let offer = DecoderOffer {
-            dimensions: (750, 1000), // 1/4 prescale + rotation
+            dimensions: Size::new(750, 1000), // 1/4 prescale + rotation
             crop_applied: None,
             orientation_applied: Orientation::ROTATE_90,
         };
         let lp = finalize(&ideal, &req, &offer);
 
         assert_eq!(lp.remaining_orientation, Orientation::IDENTITY);
-        assert_eq!(lp.resize_to, (375, 500));
+        assert_eq!(lp.resize_to, Size::new(375, 500));
         assert!(!lp.resize_is_identity); // 750×1000 → 375×500
     }
 
@@ -1913,7 +1952,7 @@ mod tests {
         let (ideal, req) = plan(&commands, 4000, 3000, None).unwrap();
 
         let offer = DecoderOffer {
-            dimensions: (1000, 750), // 1/4 prescale, no rotation
+            dimensions: Size::new(1000, 750), // 1/4 prescale, no rotation
             crop_applied: None,
             orientation_applied: Orientation::IDENTITY,
         };
@@ -1937,10 +1976,10 @@ mod tests {
             },
         ];
         let (ideal, req) = plan(&commands, 800, 600, None).unwrap();
-        assert_eq!(ideal.layout.resize_to, (100, 100));
+        assert_eq!(ideal.layout.resize_to, Size::new(100, 100));
 
         let offer = DecoderOffer {
-            dimensions: (104, 104), // MCU-aligned crop, then 1/2 prescale
+            dimensions: Size::new(104, 104), // MCU-aligned crop, then 1/2 prescale
             crop_applied: Some(Rect::new(96, 96, 208, 208)),
             orientation_applied: Orientation::IDENTITY,
         };
@@ -1966,14 +2005,14 @@ mod tests {
                 .canvas_color(CanvasColor::white()),
         }];
         let (ideal, req) = plan(&commands, 1000, 500, None).unwrap();
-        assert_eq!(ideal.layout.canvas, (400, 400));
-        assert_eq!(ideal.layout.resize_to, (400, 200));
+        assert_eq!(ideal.layout.canvas, Size::new(400, 400));
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 200));
         assert_eq!(ideal.layout.placement, (0, 100));
 
         let offer = DecoderOffer::full_decode(1000, 500);
         let lp = finalize(&ideal, &req, &offer);
 
-        assert_eq!(lp.canvas, (400, 400));
+        assert_eq!(lp.canvas, Size::new(400, 400));
         assert_eq!(lp.placement, (0, 100));
         assert_eq!(lp.canvas_color, CanvasColor::white());
     }
@@ -1984,14 +2023,14 @@ mod tests {
             constraint: Constraint::new(ConstraintMode::FitCrop, 400, 400),
         }];
         let (ideal, req) = plan(&commands, 1000, 500, None).unwrap();
-        assert_eq!(ideal.layout.canvas, (400, 400));
-        assert_eq!(ideal.layout.resize_to, (400, 400));
+        assert_eq!(ideal.layout.canvas, Size::new(400, 400));
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 400));
 
         let offer = DecoderOffer::full_decode(1000, 500);
         let lp = finalize(&ideal, &req, &offer);
 
-        assert_eq!(lp.canvas, (400, 400));
-        assert_eq!(lp.resize_to, (400, 400));
+        assert_eq!(lp.canvas, Size::new(400, 400));
+        assert_eq!(lp.resize_to, Size::new(400, 400));
     }
 
     // ── Decoder applies unrequested crop ─────────────────────────────
@@ -2007,7 +2046,7 @@ mod tests {
 
         // Decoder randomly crops to 700×500
         let offer = DecoderOffer {
-            dimensions: (700, 500),
+            dimensions: Size::new(700, 500),
             crop_applied: Some(Rect::new(50, 50, 700, 500)),
             orientation_applied: Orientation::IDENTITY,
         };
@@ -2016,7 +2055,7 @@ mod tests {
         // No trim (we didn't request a crop, so no trim logic fires)
         assert!(lp.trim.is_none());
         // Resize target is still what the layout computed
-        assert_eq!(lp.resize_to, (400, 300));
+        assert_eq!(lp.resize_to, Size::new(400, 300));
         // But resize_is_identity will be false (700×500 ≠ 400×300)
         assert!(!lp.resize_is_identity);
     }
@@ -2030,7 +2069,7 @@ mod tests {
         let (ideal, req) = plan(&commands, 800, 600, None).unwrap();
 
         let offer = DecoderOffer {
-            dimensions: (600, 800), // 270° swaps
+            dimensions: Size::new(600, 800), // 270° swaps
             crop_applied: None,
             orientation_applied: Orientation::ROTATE_270,
         };
@@ -2050,7 +2089,7 @@ mod tests {
         let (ideal, req) = plan(&commands, 800, 600, None).unwrap();
 
         let offer = DecoderOffer {
-            dimensions: (800, 600), // 180° doesn't swap
+            dimensions: Size::new(800, 600), // 180° doesn't swap
             crop_applied: None,
             orientation_applied: Orientation::ROTATE_180,
         };
@@ -2075,10 +2114,10 @@ mod tests {
         ];
         let (ideal, req) = plan(&commands, 100, 1000, None).unwrap();
         // oriented: 1000×100, fit to 500×500 → 500×50
-        assert_eq!(ideal.layout.resize_to, (500, 50));
+        assert_eq!(ideal.layout.resize_to, Size::new(500, 50));
 
         let offer = DecoderOffer {
-            dimensions: (1000, 100),
+            dimensions: Size::new(1000, 100),
             crop_applied: None,
             orientation_applied: Orientation::ROTATE_90,
         };
@@ -2086,7 +2125,7 @@ mod tests {
 
         assert_eq!(lp.remaining_orientation, Orientation::IDENTITY);
         assert!(!lp.resize_is_identity);
-        assert_eq!(lp.resize_to, (500, 50));
+        assert_eq!(lp.resize_to, Size::new(500, 50));
     }
 
     #[test]
@@ -2095,7 +2134,7 @@ mod tests {
         for exif in 1..=8u8 {
             let commands = [Command::AutoOrient(exif)];
             let (_, lp) = plan_finalize(&commands, 500, 500, &DecoderOffer::full_decode(500, 500));
-            assert_eq!(lp.resize_to, (500, 500), "EXIF {exif}");
+            assert_eq!(lp.resize_to, Size::new(500, 500), "EXIF {exif}");
             assert!(lp.resize_is_identity, "EXIF {exif}");
         }
     }
@@ -2117,7 +2156,7 @@ mod tests {
 
         // Decoder handles rotation but not crop
         let offer = DecoderOffer {
-            dimensions: (600, 800), // 270° swaps
+            dimensions: Size::new(600, 800), // 270° swaps
             crop_applied: None,
             orientation_applied: Orientation::ROTATE_270,
         };
@@ -2182,12 +2221,12 @@ mod tests {
         }];
         let (ideal, req) = plan(&commands, 1, 10000, None).unwrap();
         // Fit 1×10000 into 100×100 → 1×100
-        assert_eq!(ideal.layout.resize_to, (1, 100));
+        assert_eq!(ideal.layout.resize_to, Size::new(1, 100));
 
         let offer = DecoderOffer::full_decode(1, 10000);
         let lp = finalize(&ideal, &req, &offer);
         assert!(!lp.resize_is_identity);
-        assert_eq!(lp.resize_to, (1, 100));
+        assert_eq!(lp.resize_to, Size::new(1, 100));
     }
 
     #[test]
@@ -2196,7 +2235,7 @@ mod tests {
             constraint: Constraint::new(ConstraintMode::Fit, 100, 100),
         }];
         let (ideal, _) = plan(&commands, 10000, 1, None).unwrap();
-        assert_eq!(ideal.layout.resize_to, (100, 1));
+        assert_eq!(ideal.layout.resize_to, Size::new(100, 1));
     }
 
     // ── Exact match decoder behavior ─────────────────────────────────
@@ -2207,7 +2246,7 @@ mod tests {
         let (ideal, req) = plan(&commands, 800, 600, None).unwrap();
 
         let offer = DecoderOffer {
-            dimensions: (200, 200),
+            dimensions: Size::new(200, 200),
             crop_applied: Some(Rect::new(100, 100, 200, 200)),
             orientation_applied: Orientation::IDENTITY,
         };
@@ -2226,7 +2265,7 @@ mod tests {
         let (ideal, req) = plan(&commands, 800, 600, None).unwrap();
 
         let offer = DecoderOffer {
-            dimensions: (800, 600),
+            dimensions: Size::new(800, 600),
             crop_applied: None,
             orientation_applied: Orientation::FLIP_H,
         };
@@ -2244,20 +2283,20 @@ mod tests {
         }];
         let (ideal, req) = plan(&commands, 4000, 2000, None).unwrap();
         // Fit 4000×2000 into 400×400 → 400×200, canvas 400×400, placement (0,100)
-        assert_eq!(ideal.layout.resize_to, (400, 200));
-        assert_eq!(ideal.layout.canvas, (400, 400));
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 200));
+        assert_eq!(ideal.layout.canvas, Size::new(400, 400));
         assert_eq!(ideal.layout.placement, (0, 100));
 
         // Decoder prescales to 1000×500
         let offer = DecoderOffer {
-            dimensions: (1000, 500),
+            dimensions: Size::new(1000, 500),
             crop_applied: None,
             orientation_applied: Orientation::IDENTITY,
         };
         let lp = finalize(&ideal, &req, &offer);
 
-        assert_eq!(lp.resize_to, (400, 200));
-        assert_eq!(lp.canvas, (400, 400));
+        assert_eq!(lp.resize_to, Size::new(400, 200));
+        assert_eq!(lp.canvas, Size::new(400, 400));
         assert_eq!(lp.placement, (0, 100));
         assert!(!lp.resize_is_identity);
     }
@@ -2269,14 +2308,14 @@ mod tests {
     #[test]
     fn pipeline_basic_fit() {
         let (ideal, _) = Pipeline::new(800, 600).fit(400, 300).plan().unwrap();
-        assert_eq!(ideal.layout.resize_to, (400, 300));
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 300));
     }
 
     #[test]
     fn pipeline_within() {
         let (ideal, _) = Pipeline::new(200, 100).within(400, 300).plan().unwrap();
         // Source smaller than target → no upscale
-        assert_eq!(ideal.layout.resize_to, (200, 100));
+        assert_eq!(ideal.layout.resize_to, Size::new(200, 100));
     }
 
     #[test]
@@ -2287,7 +2326,7 @@ mod tests {
             .plan()
             .unwrap();
         // 800×600 → oriented 600×800 → fit 300×300 → 225×300
-        assert_eq!(ideal.layout.resize_to, (225, 300));
+        assert_eq!(ideal.layout.resize_to, Size::new(225, 300));
     }
 
     #[test]
@@ -2323,7 +2362,7 @@ mod tests {
             .plan()
             .unwrap();
         assert_eq!(ideal.orientation, Orientation::ROTATE_180);
-        assert_eq!(ideal.layout.resize_to, (800, 600));
+        assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
     }
 
     #[test]
@@ -2346,21 +2385,21 @@ mod tests {
     #[test]
     fn pipeline_fit_crop() {
         let (ideal, _) = Pipeline::new(1000, 500).fit_crop(400, 400).plan().unwrap();
-        assert_eq!(ideal.layout.resize_to, (400, 400));
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 400));
         assert!(ideal.layout.source_crop.is_some());
     }
 
     #[test]
     fn pipeline_fit_pad() {
         let (ideal, _) = Pipeline::new(1000, 500).fit_pad(400, 400).plan().unwrap();
-        assert_eq!(ideal.layout.resize_to, (400, 200));
-        assert_eq!(ideal.layout.canvas, (400, 400));
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 200));
+        assert_eq!(ideal.layout.canvas, Size::new(400, 400));
     }
 
     #[test]
     fn pipeline_distort() {
         let (ideal, _) = Pipeline::new(800, 600).distort(100, 100).plan().unwrap();
-        assert_eq!(ideal.layout.resize_to, (100, 100));
+        assert_eq!(ideal.layout.resize_to, Size::new(100, 100));
     }
 
     #[test]
@@ -2372,7 +2411,7 @@ mod tests {
         // Crop to 1:1 aspect, no scaling
         let crop = ideal.layout.source_crop.unwrap();
         assert_eq!(crop.width, crop.height);
-        assert_eq!(ideal.layout.resize_to, (crop.width, crop.height));
+        assert_eq!(ideal.layout.resize_to, Size::new(crop.width, crop.height));
     }
 
     #[test]
@@ -2381,8 +2420,8 @@ mod tests {
             .pad_uniform(10, CanvasColor::white())
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.resize_to, (400, 300));
-        assert_eq!(ideal.layout.canvas, (420, 320));
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 300));
+        assert_eq!(ideal.layout.canvas, Size::new(420, 320));
     }
 
     #[test]
@@ -2391,7 +2430,7 @@ mod tests {
             .pad(5, 10, 15, 20, CanvasColor::black())
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.canvas, (430, 320)); // 400+10+20, 300+5+15
+        assert_eq!(ideal.layout.canvas, Size::new(430, 320)); // 400+10+20, 300+5+15
         assert_eq!(ideal.layout.placement, (20, 5));
     }
 
@@ -2405,8 +2444,8 @@ mod tests {
             )
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.resize_to, (400, 200));
-        assert_eq!(ideal.layout.canvas, (400, 400));
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 200));
+        assert_eq!(ideal.layout.canvas, Size::new(400, 400));
         assert_eq!(ideal.layout.placement, (0, 0)); // top-left gravity
     }
 
@@ -2426,8 +2465,8 @@ mod tests {
         assert!(lp.trim.is_some());
         assert!(!lp.resize_is_identity);
         // Canvas should be resize_to + 10 each dim
-        assert_eq!(lp.canvas.0, lp.resize_to.0 + 10);
-        assert_eq!(lp.canvas.1, lp.resize_to.1 + 10);
+        assert_eq!(lp.canvas.width, lp.resize_to.width + 10);
+        assert_eq!(lp.canvas.height, lp.resize_to.height + 10);
     }
 
     #[test]
@@ -2443,7 +2482,7 @@ mod tests {
             .within(100, 100) // ignored
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.resize_to, (200, 150));
+        assert_eq!(ideal.layout.resize_to, Size::new(200, 150));
     }
 
     #[test]
@@ -2464,7 +2503,7 @@ mod tests {
             .plan()
             .unwrap();
         // Source larger → crop to aspect + downscale
-        assert_eq!(ideal.layout.resize_to, (400, 400));
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 400));
         assert!(ideal.layout.source_crop.is_some());
     }
 
@@ -2472,22 +2511,22 @@ mod tests {
     fn pipeline_within_pad() {
         let (ideal, _) = Pipeline::new(200, 100).within_pad(400, 300).plan().unwrap();
         // Source fits within target → identity (imageflow behavior)
-        assert_eq!(ideal.layout.resize_to, (200, 100));
-        assert_eq!(ideal.layout.canvas, (200, 100));
+        assert_eq!(ideal.layout.resize_to, Size::new(200, 100));
+        assert_eq!(ideal.layout.canvas, Size::new(200, 100));
     }
 
     #[test]
     fn pipeline_rotate_270() {
         let (ideal, _) = Pipeline::new(800, 600).rotate_270().plan().unwrap();
         assert_eq!(ideal.orientation, Orientation::ROTATE_270);
-        assert_eq!(ideal.layout.resize_to, (600, 800));
+        assert_eq!(ideal.layout.resize_to, Size::new(600, 800));
     }
 
     #[test]
     fn pipeline_rotate_180() {
         let (ideal, _) = Pipeline::new(800, 600).rotate_180().plan().unwrap();
         assert_eq!(ideal.orientation, Orientation::ROTATE_180);
-        assert_eq!(ideal.layout.resize_to, (800, 600));
+        assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -2498,22 +2537,26 @@ mod tests {
     fn secondary_no_crop_quarter_scale() {
         // SDR: 4000×3000, gain map: 1000×750 (exactly 1/4)
         let (sdr, _) = Pipeline::new(4000, 3000).fit(800, 600).plan().unwrap();
-        let (gm, gm_req) = sdr.derive_secondary((4000, 3000), (1000, 750), None);
+        let (gm, gm_req) = sdr.derive_secondary(Size::new(4000, 3000), Size::new(1000, 750), None);
 
         assert_eq!(gm.orientation, sdr.orientation);
         assert!(gm.source_crop.is_none()); // no crop → no crop
         assert!(gm_req.crop.is_none());
         // Auto target: 800×600 * 0.25 = 200×150
-        assert_eq!(gm.layout.resize_to, (200, 150));
+        assert_eq!(gm.layout.resize_to, Size::new(200, 150));
     }
 
     #[test]
     fn secondary_no_crop_explicit_target() {
         let (sdr, _) = Pipeline::new(4000, 3000).fit(800, 600).plan().unwrap();
-        let (gm, _) = sdr.derive_secondary((4000, 3000), (1000, 750), Some((800, 600)));
+        let (gm, _) = sdr.derive_secondary(
+            Size::new(4000, 3000),
+            Size::new(1000, 750),
+            Some(Size::new(800, 600)),
+        );
 
         // Explicit target: gain map rendered at full SDR size
-        assert_eq!(gm.layout.resize_to, (800, 600));
+        assert_eq!(gm.layout.resize_to, Size::new(800, 600));
     }
 
     #[test]
@@ -2524,7 +2567,7 @@ mod tests {
             .plan()
             .unwrap();
 
-        let (gm, gm_req) = sdr.derive_secondary((4000, 3000), (1000, 750), None);
+        let (gm, gm_req) = sdr.derive_secondary(Size::new(4000, 3000), Size::new(1000, 750), None);
 
         let crop = gm_req.crop.unwrap();
         assert_eq!(crop, Rect::new(25, 25, 50, 50));
@@ -2543,7 +2586,7 @@ mod tests {
             .plan()
             .unwrap();
 
-        let (_, gm_req) = sdr.derive_secondary((4000, 3000), (1000, 750), None);
+        let (_, gm_req) = sdr.derive_secondary(Size::new(4000, 3000), Size::new(1000, 750), None);
         let crop = gm_req.crop.unwrap();
 
         assert_eq!(crop.x, 25);
@@ -2560,12 +2603,12 @@ mod tests {
             .plan()
             .unwrap();
 
-        let (gm, gm_req) = sdr.derive_secondary((4000, 3000), (1000, 750), None);
+        let (gm, gm_req) = sdr.derive_secondary(Size::new(4000, 3000), Size::new(1000, 750), None);
 
         assert_eq!(gm.orientation, Orientation::ROTATE_90);
         assert_eq!(gm_req.orientation, Orientation::ROTATE_90);
         // Oriented secondary: 750×1000 (rotated)
-        assert_eq!(gm.layout.source, (750, 1000));
+        assert_eq!(gm.layout.source, Size::new(750, 1000));
     }
 
     #[test]
@@ -2579,7 +2622,7 @@ mod tests {
             .plan()
             .unwrap();
 
-        let (_gm, gm_req) = sdr.derive_secondary((4000, 3000), (1000, 750), None);
+        let (_gm, gm_req) = sdr.derive_secondary(Size::new(4000, 3000), Size::new(1000, 750), None);
 
         // Both should have crops in source (pre-orient) space
         assert!(sdr_req.crop.is_some());
@@ -2612,7 +2655,7 @@ mod tests {
             .plan()
             .unwrap();
 
-        let (gm, gm_req) = sdr.derive_secondary((4000, 3000), (1000, 750), None);
+        let (gm, gm_req) = sdr.derive_secondary(Size::new(4000, 3000), Size::new(1000, 750), None);
 
         let sdr_plan = sdr.finalize(&sdr_req, &DecoderOffer::full_decode(4000, 3000));
         let gm_plan = gm.finalize(&gm_req, &DecoderOffer::full_decode(1000, 750));
@@ -2641,11 +2684,11 @@ mod tests {
             .plan()
             .unwrap();
 
-        let (gm, gm_req) = sdr.derive_secondary((4000, 3000), (1000, 750), None);
+        let (gm, gm_req) = sdr.derive_secondary(Size::new(4000, 3000), Size::new(1000, 750), None);
 
         // SDR decoder handles everything
         let sdr_offer = DecoderOffer {
-            dimensions: (2000, 2000),
+            dimensions: Size::new(2000, 2000),
             crop_applied: sdr_req.crop,
             orientation_applied: Orientation::ROTATE_90,
         };
@@ -2677,12 +2720,12 @@ mod tests {
             .plan()
             .unwrap();
 
-        let (gm, gm_req) = sdr.derive_secondary((800, 600), (200, 150), None);
+        let (gm, gm_req) = sdr.derive_secondary(Size::new(800, 600), Size::new(200, 150), None);
         let gm_crop_requested = gm_req.crop.unwrap();
 
         // SDR decoder: MCU-aligned
         let sdr_offer = DecoderOffer {
-            dimensions: (208, 208),
+            dimensions: Size::new(208, 208),
             crop_applied: Some(Rect::new(96, 96, 208, 208)),
             orientation_applied: Orientation::IDENTITY,
         };
@@ -2690,7 +2733,7 @@ mod tests {
 
         // GM decoder: different MCU alignment
         let gm_offer = DecoderOffer {
-            dimensions: (56, 56),
+            dimensions: Size::new(56, 56),
             crop_applied: Some(Rect::new(24, 24, 56, 56)),
             orientation_applied: Orientation::IDENTITY,
         };
@@ -2727,9 +2770,9 @@ mod tests {
 
         // SDR has padding
         assert!(sdr.padding.is_some());
-        assert_eq!(sdr.layout.canvas, (420, 420)); // 400+20 from explicit pad
+        assert_eq!(sdr.layout.canvas, Size::new(420, 420)); // 400+20 from explicit pad
 
-        let (gm, _) = sdr.derive_secondary((800, 600), (200, 150), None);
+        let (gm, _) = sdr.derive_secondary(Size::new(800, 600), Size::new(200, 150), None);
 
         // Gain map: no padding
         assert!(gm.padding.is_none());
@@ -2746,7 +2789,7 @@ mod tests {
             .plan()
             .unwrap();
 
-        let (_, gm_req) = sdr.derive_secondary((1920, 1080), (480, 270), None);
+        let (_, gm_req) = sdr.derive_secondary(Size::new(1920, 1080), Size::new(480, 270), None);
         let crop = gm_req.crop.unwrap();
         assert_eq!(crop, Rect::new(25, 12, 125, 76));
     }
@@ -2760,7 +2803,7 @@ mod tests {
             .plan()
             .unwrap();
 
-        let (_, gm_req) = sdr.derive_secondary((1000, 1000), (333, 333), None);
+        let (_, gm_req) = sdr.derive_secondary(Size::new(1000, 1000), Size::new(333, 333), None);
         let crop = gm_req.crop.unwrap();
 
         // Round outward: origin floors, far edge ceils
@@ -2788,7 +2831,7 @@ mod tests {
             .plan()
             .unwrap();
 
-        let (_, gm_req) = sdr.derive_secondary((4000, 3000), (1000, 750), None);
+        let (_, gm_req) = sdr.derive_secondary(Size::new(4000, 3000), Size::new(1000, 750), None);
         let crop = gm_req.crop.unwrap();
 
         // Should be clamped to gain map bounds
@@ -2799,13 +2842,13 @@ mod tests {
     #[test]
     fn secondary_passthrough_no_commands() {
         let (sdr, _) = Pipeline::new(800, 600).plan().unwrap();
-        let (gm, gm_req) = sdr.derive_secondary((800, 600), (200, 150), None);
+        let (gm, gm_req) = sdr.derive_secondary(Size::new(800, 600), Size::new(200, 150), None);
 
         assert!(gm.source_crop.is_none());
         assert!(gm_req.crop.is_none());
         assert_eq!(gm.orientation, Orientation::IDENTITY);
-        assert_eq!(gm.layout.resize_to, (200, 150));
-        assert_eq!(gm.layout.source, (200, 150));
+        assert_eq!(gm.layout.resize_to, Size::new(200, 150));
+        assert_eq!(gm.layout.source, Size::new(200, 150));
     }
 
     #[test]
@@ -2817,11 +2860,11 @@ mod tests {
             .plan()
             .unwrap();
 
-        let (gm, gm_req) = sdr.derive_secondary((4000, 3000), (1000, 750), None);
+        let (gm, gm_req) = sdr.derive_secondary(Size::new(4000, 3000), Size::new(1000, 750), None);
 
         // SDR decoder handles everything
         let sdr_offer = DecoderOffer {
-            dimensions: (1000, 1500),
+            dimensions: Size::new(1000, 1500),
             crop_applied: sdr_req.crop,
             orientation_applied: Orientation::ROTATE_90,
         };
@@ -2831,7 +2874,7 @@ mod tests {
 
         // GM decoder handles everything too
         let gm_offer = DecoderOffer {
-            dimensions: (gm.layout.resize_to.0, gm.layout.resize_to.1),
+            dimensions: Size::new(gm.layout.resize_to.width, gm.layout.resize_to.height),
             crop_applied: gm_req.crop,
             orientation_applied: Orientation::ROTATE_90,
         };
@@ -2843,11 +2886,8 @@ mod tests {
     #[test]
     fn secondary_all_8_orientations() {
         for exif in 1..=8u8 {
-            let (sdr, _) = Pipeline::new(800, 600)
-                .auto_orient(exif)
-                .plan()
-                .unwrap();
-            let (gm, gm_req) = sdr.derive_secondary((800, 600), (200, 150), None);
+            let (sdr, _) = Pipeline::new(800, 600).auto_orient(exif).plan().unwrap();
+            let (gm, gm_req) = sdr.derive_secondary(Size::new(800, 600), Size::new(200, 150), None);
 
             assert_eq!(
                 gm.orientation,
@@ -2873,15 +2913,15 @@ mod tests {
         let (ideal, _) = Pipeline::new(100, 100)
             .fit(2000, 2000)
             .limits(MandatoryConstraints {
-                max: Some((500, 500)),
+                max: Some(Size::new(500, 500)),
                 ..Default::default()
             })
             .plan()
             .unwrap();
-        assert!(ideal.layout.resize_to.0 <= 500);
-        assert!(ideal.layout.resize_to.1 <= 500);
-        assert!(ideal.layout.canvas.0 <= 500);
-        assert!(ideal.layout.canvas.1 <= 500);
+        assert!(ideal.layout.resize_to.width <= 500);
+        assert!(ideal.layout.resize_to.height <= 500);
+        assert!(ideal.layout.canvas.width <= 500);
+        assert!(ideal.layout.canvas.height <= 500);
     }
 
     #[test]
@@ -2891,13 +2931,13 @@ mod tests {
         let (ideal, _) = Pipeline::new(1000, 500)
             .fit(2000, 1000)
             .limits(MandatoryConstraints {
-                max: Some((600, 600)),
+                max: Some(Size::new(600, 600)),
                 ..Default::default()
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.resize_to, (600, 300));
-        assert_eq!(ideal.layout.canvas, (600, 300));
+        assert_eq!(ideal.layout.resize_to, Size::new(600, 300));
+        assert_eq!(ideal.layout.canvas, Size::new(600, 300));
     }
 
     #[test]
@@ -2907,15 +2947,15 @@ mod tests {
         let (ideal, _) = Pipeline::new(800, 600)
             .fit_pad(400, 400)
             .limits(MandatoryConstraints {
-                max: Some((200, 200)),
+                max: Some(Size::new(200, 200)),
                 ..Default::default()
             })
             .plan()
             .unwrap();
-        assert!(ideal.layout.canvas.0 <= 200);
-        assert!(ideal.layout.canvas.1 <= 200);
-        assert_eq!(ideal.layout.resize_to, (200, 150));
-        assert_eq!(ideal.layout.canvas, (200, 200));
+        assert!(ideal.layout.canvas.width <= 200);
+        assert!(ideal.layout.canvas.height <= 200);
+        assert_eq!(ideal.layout.resize_to, Size::new(200, 150));
+        assert_eq!(ideal.layout.canvas, Size::new(200, 200));
     }
 
     #[test]
@@ -2924,12 +2964,12 @@ mod tests {
         let (ideal, _) = Pipeline::new(800, 600)
             .fit(400, 300)
             .limits(MandatoryConstraints {
-                max: Some((1000, 1000)),
+                max: Some(Size::new(1000, 1000)),
                 ..Default::default()
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.resize_to, (400, 300));
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 300));
     }
 
     #[test]
@@ -2939,14 +2979,14 @@ mod tests {
         let (ideal, _) = Pipeline::new(100, 100)
             .within(50, 50)
             .limits(MandatoryConstraints {
-                min: Some((200, 200)),
+                min: Some(Size::new(200, 200)),
                 ..Default::default()
             })
             .plan()
             .unwrap();
         // Min should push resize_to up to at least 200 on the smaller axis
-        assert!(ideal.layout.resize_to.0 >= 200);
-        assert!(ideal.layout.resize_to.1 >= 200);
+        assert!(ideal.layout.resize_to.width >= 200);
+        assert!(ideal.layout.resize_to.height >= 200);
     }
 
     #[test]
@@ -2956,12 +2996,12 @@ mod tests {
         let (ideal, _) = Pipeline::new(1000, 500)
             .within(100, 50)
             .limits(MandatoryConstraints {
-                min: Some((200, 200)),
+                min: Some(Size::new(200, 200)),
                 ..Default::default()
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.resize_to, (400, 200));
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 200));
     }
 
     #[test]
@@ -2970,16 +3010,16 @@ mod tests {
         let (ideal, _) = Pipeline::new(1000, 1000)
             .within(100, 100)
             .limits(MandatoryConstraints {
-                max: Some((200, 200)),
-                min: Some((500, 500)),
+                max: Some(Size::new(200, 200)),
+                min: Some(Size::new(500, 500)),
                 ..Default::default()
             })
             .plan()
             .unwrap();
-        assert!(ideal.layout.resize_to.0 <= 200);
-        assert!(ideal.layout.resize_to.1 <= 200);
-        assert!(ideal.layout.canvas.0 <= 200);
-        assert!(ideal.layout.canvas.1 <= 200);
+        assert!(ideal.layout.resize_to.width <= 200);
+        assert!(ideal.layout.resize_to.height <= 200);
+        assert!(ideal.layout.canvas.width <= 200);
+        assert!(ideal.layout.canvas.height <= 200);
     }
 
     #[test]
@@ -2994,9 +3034,9 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.resize_to.0 % 16, 0);
-        assert_eq!(ideal.layout.resize_to.1 % 16, 0);
-        assert_eq!(ideal.layout.resize_to, (992, 656));
+        assert_eq!(ideal.layout.resize_to.width % 16, 0);
+        assert_eq!(ideal.layout.resize_to.height % 16, 0);
+        assert_eq!(ideal.layout.resize_to, Size::new(992, 656));
     }
 
     #[test]
@@ -3010,7 +3050,7 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.resize_to, (800, 600));
+        assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
     }
 
     #[test]
@@ -3025,10 +3065,10 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.canvas.0 % 16, 0);
-        assert_eq!(ideal.layout.canvas.1 % 16, 0);
-        assert_eq!(ideal.layout.canvas, (400, 400));
-        assert_eq!(ideal.layout.resize_to, (400, 300)); // unchanged
+        assert_eq!(ideal.layout.canvas.width % 16, 0);
+        assert_eq!(ideal.layout.canvas.height % 16, 0);
+        assert_eq!(ideal.layout.canvas, Size::new(400, 400));
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 300)); // unchanged
     }
 
     #[test]
@@ -3043,11 +3083,11 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.canvas.0 % 16, 0);
-        assert_eq!(ideal.layout.canvas.1 % 16, 0);
+        assert_eq!(ideal.layout.canvas.width % 16, 0);
+        assert_eq!(ideal.layout.canvas.height % 16, 0);
         // resize_to clamped to canvas
-        assert!(ideal.layout.resize_to.0 <= ideal.layout.canvas.0);
-        assert!(ideal.layout.resize_to.1 <= ideal.layout.canvas.1);
+        assert!(ideal.layout.resize_to.width <= ideal.layout.canvas.width);
+        assert!(ideal.layout.resize_to.height <= ideal.layout.canvas.height);
     }
 
     #[test]
@@ -3060,7 +3100,7 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.resize_to, (801, 601));
+        assert_eq!(ideal.layout.resize_to, Size::new(801, 601));
     }
 
     #[test]
@@ -3070,20 +3110,20 @@ mod tests {
         let (ideal, _) = Pipeline::new(100, 100)
             .fit(10000, 10000)
             .limits(MandatoryConstraints {
-                max: Some((1920, 1080)),
-                min: Some((100, 100)),
+                max: Some(Size::new(1920, 1080)),
+                min: Some(Size::new(100, 100)),
                 align: Some(Align::Crop(8, 8)),
             })
             .plan()
             .unwrap();
         // Max caps to 1080×1080 (square, height constrains)
-        assert!(ideal.layout.canvas.0 <= 1920);
-        assert!(ideal.layout.canvas.1 <= 1080);
+        assert!(ideal.layout.canvas.width <= 1920);
+        assert!(ideal.layout.canvas.height <= 1080);
         // Align snaps canvas
-        assert_eq!(ideal.layout.canvas.0 % 8, 0);
-        assert_eq!(ideal.layout.canvas.1 % 8, 0);
+        assert_eq!(ideal.layout.canvas.width % 8, 0);
+        assert_eq!(ideal.layout.canvas.height % 8, 0);
         // Min satisfied (1080 > 100)
-        assert!(ideal.layout.canvas.0 >= 100);
+        assert!(ideal.layout.canvas.width >= 100);
     }
 
     #[test]
@@ -3094,13 +3134,13 @@ mod tests {
             .fit(200, 200)
             .pad_uniform(50, CanvasColor::white())
             .limits(MandatoryConstraints {
-                max: Some((250, 250)),
+                max: Some(Size::new(250, 250)),
                 ..Default::default()
             })
             .plan()
             .unwrap();
-        assert!(ideal.layout.canvas.0 <= 250);
-        assert!(ideal.layout.canvas.1 <= 250);
+        assert!(ideal.layout.canvas.width <= 250);
+        assert!(ideal.layout.canvas.height <= 250);
     }
 
     #[test]
@@ -3126,8 +3166,8 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.canvas, (16, 16));
-        assert_eq!(ideal.layout.resize_to, (3, 3));
+        assert_eq!(ideal.layout.canvas, Size::new(16, 16));
+        assert_eq!(ideal.layout.resize_to, Size::new(3, 3));
     }
 
     // ── CanvasColor::Linear ─────────────────────────────────────────────
@@ -3176,7 +3216,10 @@ mod tests {
             )
             .plan()
             .unwrap();
-        assert!(matches!(ideal.layout.canvas_color, CanvasColor::Linear { .. }));
+        assert!(matches!(
+            ideal.layout.canvas_color,
+            CanvasColor::Linear { .. }
+        ));
     }
 
     // ── Align::Extend ───────────────────────────────────────────────────
@@ -3192,10 +3235,10 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.canvas, (816, 608));
-        assert_eq!(ideal.encode_crop, Some((801, 601)));
+        assert_eq!(ideal.layout.canvas, Size::new(816, 608));
+        assert_eq!(ideal.encode_crop, Some(Size::new(801, 601)));
         assert_eq!(ideal.layout.placement, (0, 0));
-        assert_eq!(ideal.layout.resize_to, (801, 601));
+        assert_eq!(ideal.layout.resize_to, Size::new(801, 601));
     }
 
     #[test]
@@ -3209,7 +3252,7 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.canvas, (800, 640));
+        assert_eq!(ideal.layout.canvas, Size::new(800, 640));
         assert_eq!(ideal.encode_crop, None);
     }
 
@@ -3224,8 +3267,8 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.canvas, (802, 602));
-        assert_eq!(ideal.encode_crop, Some((801, 601)));
+        assert_eq!(ideal.layout.canvas, Size::new(802, 602));
+        assert_eq!(ideal.encode_crop, Some(Size::new(801, 601)));
     }
 
     #[test]
@@ -3239,9 +3282,9 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.canvas, (104, 104));
-        assert_eq!(ideal.encode_crop, Some((100, 100)));
-        assert_eq!(ideal.layout.resize_to, (100, 100));
+        assert_eq!(ideal.layout.canvas, Size::new(104, 104));
+        assert_eq!(ideal.encode_crop, Some(Size::new(100, 100)));
+        assert_eq!(ideal.layout.resize_to, Size::new(100, 100));
     }
 
     #[test]
@@ -3256,7 +3299,7 @@ mod tests {
             .plan()
             .unwrap();
         // 400 is mod-16, so no extension
-        assert_eq!(ideal.layout.canvas, (400, 400));
+        assert_eq!(ideal.layout.canvas, Size::new(400, 400));
         assert_eq!(ideal.encode_crop, None);
     }
 
@@ -3271,8 +3314,8 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.canvas, (416, 416));
-        assert_eq!(ideal.encode_crop, Some((401, 401)));
+        assert_eq!(ideal.layout.canvas, Size::new(416, 416));
+        assert_eq!(ideal.encode_crop, Some(Size::new(401, 401)));
         assert_eq!(ideal.layout.placement, (0, 0)); // moved to origin
     }
 
@@ -3289,8 +3332,8 @@ mod tests {
             .unwrap();
         let offer = DecoderOffer::full_decode(801, 601);
         let lp = ideal.finalize(&req, &offer);
-        assert_eq!(lp.canvas, (816, 608));
-        assert_eq!(lp.encode_crop, Some((801, 601)));
+        assert_eq!(lp.canvas, Size::new(816, 608));
+        assert_eq!(lp.encode_crop, Some(Size::new(801, 601)));
     }
 
     #[test]
@@ -3300,18 +3343,22 @@ mod tests {
         let (ideal, _) = Pipeline::new(4000, 3000)
             .fit(4000, 3000)
             .limits(MandatoryConstraints {
-                max: Some((1920, 1080)),
+                max: Some(Size::new(1920, 1080)),
                 align: Some(Align::Extend(16, 16)),
                 ..Default::default()
             })
             .plan()
             .unwrap();
-        assert!(ideal.layout.canvas.0 % 16 == 0);
-        assert!(ideal.layout.canvas.1 % 16 == 0);
+        assert!(ideal.layout.canvas.width % 16 == 0);
+        assert!(ideal.layout.canvas.height % 16 == 0);
         // Max applied first, then extend only adds a few pixels
-        assert!(ideal.layout.canvas.0 <= 1920 + 15);
-        assert!(ideal.layout.canvas.1 <= 1080 + 15);
-        if let Some((cw, ch)) = ideal.encode_crop {
+        assert!(ideal.layout.canvas.width <= 1920 + 15);
+        assert!(ideal.layout.canvas.height <= 1080 + 15);
+        if let Some(Size {
+            width: cw,
+            height: ch,
+        }) = ideal.encode_crop
+        {
             assert!(cw <= 1920);
             assert!(ch <= 1080);
         }
@@ -3330,8 +3377,8 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.canvas, (816, 608));
-        assert_eq!(ideal.encode_crop, Some((801, 601)));
+        assert_eq!(ideal.layout.canvas, Size::new(816, 608));
+        assert_eq!(ideal.encode_crop, Some(Size::new(801, 601)));
     }
 
     #[test]
@@ -3347,9 +3394,9 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.canvas, (816, 608));
-        assert_eq!(ideal.layout.canvas.0 % 16, 0);
-        assert_eq!(ideal.layout.canvas.1 % 16, 0);
+        assert_eq!(ideal.layout.canvas, Size::new(816, 608));
+        assert_eq!(ideal.layout.canvas.width % 16, 0);
+        assert_eq!(ideal.layout.canvas.height % 16, 0);
     }
 
     #[test]
@@ -3363,9 +3410,9 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.canvas.0 % 16, 0);
-        assert_eq!(ideal.layout.canvas.1 % 8, 0);
-        assert_eq!(ideal.layout.canvas, (800, 600));
+        assert_eq!(ideal.layout.canvas.width % 16, 0);
+        assert_eq!(ideal.layout.canvas.height % 8, 0);
+        assert_eq!(ideal.layout.canvas, Size::new(800, 600));
     }
 
     #[test]
@@ -3402,8 +3449,8 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.resize_to, (800, 608));
-        assert_eq!(ideal.layout.canvas, (800, 608));
+        assert_eq!(ideal.layout.resize_to, Size::new(800, 608));
+        assert_eq!(ideal.layout.canvas, Size::new(800, 608));
         assert_eq!(ideal.encode_crop, None); // no encode_crop for distort
     }
 
@@ -3417,8 +3464,8 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.resize_to, (800, 640));
-        assert_eq!(ideal.layout.canvas, (800, 640));
+        assert_eq!(ideal.layout.resize_to, Size::new(800, 640));
+        assert_eq!(ideal.layout.canvas, Size::new(800, 640));
     }
 
     #[test]
@@ -3432,8 +3479,8 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.resize_to, (802, 602));
-        assert_eq!(ideal.layout.canvas, (802, 602));
+        assert_eq!(ideal.layout.resize_to, Size::new(802, 602));
+        assert_eq!(ideal.layout.canvas, Size::new(802, 602));
     }
 
     #[test]
@@ -3449,11 +3496,11 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.resize_to.0 % 16, 0);
-        assert_eq!(ideal.layout.resize_to.1 % 16, 0);
+        assert_eq!(ideal.layout.resize_to.width % 16, 0);
+        assert_eq!(ideal.layout.resize_to.height % 16, 0);
         // Canvas stays >= resize_to in padded mode
-        assert!(ideal.layout.canvas.0 >= ideal.layout.resize_to.0);
-        assert!(ideal.layout.canvas.1 >= ideal.layout.resize_to.1);
+        assert!(ideal.layout.canvas.width >= ideal.layout.resize_to.width);
+        assert!(ideal.layout.canvas.height >= ideal.layout.resize_to.height);
     }
 
     #[test]
@@ -3469,8 +3516,8 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.resize_to, (800, 600));
-        assert_eq!(ideal.layout.canvas, (800, 600));
+        assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
+        assert_eq!(ideal.layout.canvas, Size::new(800, 600));
         assert_eq!(ideal.layout.placement, (0, 0));
     }
 
@@ -3485,9 +3532,9 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.resize_to.0 % 16, 0);
-        assert_eq!(ideal.layout.resize_to.1 % 8, 0);
-        assert_eq!(ideal.layout.resize_to, (800, 600));
+        assert_eq!(ideal.layout.resize_to.width % 16, 0);
+        assert_eq!(ideal.layout.resize_to.height % 8, 0);
+        assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
     }
 
     // ── CodecLayout ─────────────────────────────────────────────────────
@@ -3495,12 +3542,12 @@ mod tests {
     #[test]
     fn codec_layout_420_aligned() {
         // 800×608, already MCU-aligned for 4:2:0
-        let cl = CodecLayout::new((800, 608), Subsampling::S420);
-        assert_eq!(cl.mcu_size, (16, 16));
-        assert_eq!(cl.luma.extended, (800, 608));
-        assert_eq!(cl.luma.content, (800, 608));
-        assert_eq!(cl.chroma.extended, (400, 304));
-        assert_eq!(cl.chroma.content, (400, 304));
+        let cl = CodecLayout::new(Size::new(800, 608), Subsampling::S420);
+        assert_eq!(cl.mcu_size, Size::new(16, 16));
+        assert_eq!(cl.luma.extended, Size::new(800, 608));
+        assert_eq!(cl.luma.content, Size::new(800, 608));
+        assert_eq!(cl.chroma.extended, Size::new(400, 304));
+        assert_eq!(cl.chroma.content, Size::new(400, 304));
         assert_eq!(cl.mcu_cols, 50);
         assert_eq!(cl.mcu_rows, 38);
         assert_eq!(cl.luma_rows_per_mcu, 16);
@@ -3512,10 +3559,10 @@ mod tests {
 
     #[test]
     fn codec_layout_422() {
-        let cl = CodecLayout::new((800, 600), Subsampling::S422);
-        assert_eq!(cl.mcu_size, (16, 8));
-        assert_eq!(cl.luma.extended, (800, 600));
-        assert_eq!(cl.chroma.extended, (400, 600));
+        let cl = CodecLayout::new(Size::new(800, 600), Subsampling::S422);
+        assert_eq!(cl.mcu_size, Size::new(16, 8));
+        assert_eq!(cl.luma.extended, Size::new(800, 600));
+        assert_eq!(cl.chroma.extended, Size::new(400, 600));
         assert_eq!(cl.luma_rows_per_mcu, 8);
         assert_eq!(cl.mcu_cols, 50);
         assert_eq!(cl.mcu_rows, 75);
@@ -3523,21 +3570,21 @@ mod tests {
 
     #[test]
     fn codec_layout_444() {
-        let cl = CodecLayout::new((800, 600), Subsampling::S444);
-        assert_eq!(cl.mcu_size, (8, 8));
-        assert_eq!(cl.luma.extended, (800, 600));
-        assert_eq!(cl.chroma.extended, (800, 600)); // same as luma
+        let cl = CodecLayout::new(Size::new(800, 600), Subsampling::S444);
+        assert_eq!(cl.mcu_size, Size::new(8, 8));
+        assert_eq!(cl.luma.extended, Size::new(800, 600));
+        assert_eq!(cl.chroma.extended, Size::new(800, 600)); // same as luma
         assert_eq!(cl.luma_rows_per_mcu, 8);
     }
 
     #[test]
     fn codec_layout_unaligned_extends_internally() {
         // 801×601 with 4:2:0 — CodecLayout rounds up internally
-        let cl = CodecLayout::new((801, 601), Subsampling::S420);
-        assert_eq!(cl.luma.content, (801, 601));
-        assert_eq!(cl.luma.extended, (816, 608));
-        assert_eq!(cl.chroma.content, (401, 301));
-        assert_eq!(cl.chroma.extended, (408, 304));
+        let cl = CodecLayout::new(Size::new(801, 601), Subsampling::S420);
+        assert_eq!(cl.luma.content, Size::new(801, 601));
+        assert_eq!(cl.luma.extended, Size::new(816, 608));
+        assert_eq!(cl.chroma.content, Size::new(401, 301));
+        assert_eq!(cl.chroma.extended, Size::new(408, 304));
     }
 
     #[test]
@@ -3556,15 +3603,15 @@ mod tests {
         let cl = CodecLayout::new(ideal.layout.canvas, Subsampling::S420);
 
         // Canvas is MCU-aligned
-        assert_eq!(ideal.layout.canvas.0 % 16, 0);
-        assert_eq!(ideal.layout.canvas.1 % 16, 0);
+        assert_eq!(ideal.layout.canvas.width % 16, 0);
+        assert_eq!(ideal.layout.canvas.height % 16, 0);
 
         // CodecLayout agrees with canvas
         assert_eq!(cl.luma.extended, ideal.layout.canvas);
 
         // Chroma is exactly half
-        assert_eq!(cl.chroma.extended.0, cl.luma.extended.0 / 2);
-        assert_eq!(cl.chroma.extended.1, cl.luma.extended.1 / 2);
+        assert_eq!(cl.chroma.extended.width, cl.luma.extended.width / 2);
+        assert_eq!(cl.chroma.extended.height, cl.luma.extended.height / 2);
 
         // Streaming: feed 16 rows at a time
         assert_eq!(cl.luma_rows_per_mcu, 16);
@@ -3573,9 +3620,9 @@ mod tests {
     #[test]
     fn codec_layout_1x1() {
         // Tiny image: 1×1 with 4:2:0 → MCU 16×16
-        let cl = CodecLayout::new((1, 1), Subsampling::S420);
-        assert_eq!(cl.luma.extended, (16, 16));
-        assert_eq!(cl.chroma.extended, (8, 8));
+        let cl = CodecLayout::new(Size::new(1, 1), Subsampling::S420);
+        assert_eq!(cl.luma.extended, Size::new(16, 16));
+        assert_eq!(cl.chroma.extended, Size::new(8, 8));
         assert_eq!(cl.mcu_cols, 1);
         assert_eq!(cl.mcu_rows, 1);
     }

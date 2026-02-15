@@ -7,14 +7,14 @@
 //! # Example
 //!
 //! ```
-//! use zenlayout::{Constraint, ConstraintMode};
+//! use zenlayout::{Constraint, ConstraintMode, Size};
 //!
 //! let layout = Constraint::new(ConstraintMode::FitCrop, 400, 300)
 //!     .compute(1000, 500)
 //!     .unwrap();
 //!
 //! // Source cropped to 4:3 aspect ratio, then resized to 400×300
-//! assert_eq!(layout.resize_to, (400, 300));
+//! assert_eq!(layout.resize_to, Size::new(400, 300));
 //! assert!(layout.source_crop.is_some());
 //! ```
 
@@ -261,6 +261,22 @@ impl SourceCrop {
     }
 }
 
+/// Width × height dimensions in pixels.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Size {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
+impl Size {
+    /// Create a new size.
+    pub const fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+}
+
 /// Axis-aligned rectangle in pixel coordinates.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Rect {
@@ -310,7 +326,7 @@ impl Rect {
 /// # Example
 ///
 /// ```
-/// use zenlayout::{Constraint, ConstraintMode, CanvasColor, Gravity};
+/// use zenlayout::{Constraint, ConstraintMode, CanvasColor, Gravity, Size};
 ///
 /// let layout = Constraint::new(ConstraintMode::FitPad, 400, 300)
 ///     .gravity(Gravity::Center)
@@ -318,7 +334,7 @@ impl Rect {
 ///     .compute(1000, 500)
 ///     .unwrap();
 ///
-/// assert_eq!(layout.canvas, (400, 300));
+/// assert_eq!(layout.canvas, Size::new(400, 300));
 /// assert!(layout.needs_padding());
 /// ```
 #[derive(Clone, Debug, PartialEq)]
@@ -436,10 +452,10 @@ impl Constraint {
                 _ => ((rw, rh), (0, 0)),
             };
             return Ok(Layout {
-                source: (source_w, source_h),
+                source: Size::new(source_w, source_h),
                 source_crop: user_crop,
-                resize_to: (rw, rh),
-                canvas,
+                resize_to: Size::new(rw, rh),
+                canvas: Size::new(canvas.0, canvas.1),
                 placement,
                 canvas_color: self.canvas_color,
             }
@@ -449,10 +465,10 @@ impl Constraint {
         // Step 3: Compute layout based on mode.
         let layout = match self.mode {
             Distort => Layout {
-                source: (source_w, source_h),
+                source: Size::new(source_w, source_h),
                 source_crop: user_crop,
-                resize_to: (tw, th),
-                canvas: (tw, th),
+                resize_to: Size::new(tw, th),
+                canvas: Size::new(tw, th),
                 placement: (0, 0),
                 canvas_color: self.canvas_color,
             },
@@ -460,10 +476,10 @@ impl Constraint {
             Fit => {
                 let (rw, rh) = fit_inside(sw, sh, tw, th);
                 Layout {
-                    source: (source_w, source_h),
+                    source: Size::new(source_w, source_h),
                     source_crop: user_crop,
-                    resize_to: (rw, rh),
-                    canvas: (rw, rh),
+                    resize_to: Size::new(rw, rh),
+                    canvas: Size::new(rw, rh),
                     placement: (0, 0),
                     canvas_color: self.canvas_color,
                 }
@@ -476,10 +492,10 @@ impl Constraint {
                     fit_inside(sw, sh, tw, th)
                 };
                 Layout {
-                    source: (source_w, source_h),
+                    source: Size::new(source_w, source_h),
                     source_crop: user_crop,
-                    resize_to: (rw, rh),
-                    canvas: (rw, rh),
+                    resize_to: Size::new(rw, rh),
+                    canvas: Size::new(rw, rh),
                     placement: (0, 0),
                     canvas_color: self.canvas_color,
                 }
@@ -489,10 +505,10 @@ impl Constraint {
                 let aspect_crop = crop_to_aspect(sw, sh, tw, th, &self.gravity);
                 let combined = combine_crops(user_crop, aspect_crop);
                 Layout {
-                    source: (source_w, source_h),
+                    source: Size::new(source_w, source_h),
                     source_crop: Some(combined),
-                    resize_to: (tw, th),
-                    canvas: (tw, th),
+                    resize_to: Size::new(tw, th),
+                    canvas: Size::new(tw, th),
                     placement: (0, 0),
                     canvas_color: self.canvas_color,
                 }
@@ -505,10 +521,10 @@ impl Constraint {
                 if sw <= tw && sh <= th {
                     // Source fits within target — no action (identity).
                     Layout {
-                        source: (source_w, source_h),
+                        source: Size::new(source_w, source_h),
                         source_crop: user_crop,
-                        resize_to: (sw, sh),
-                        canvas: (sw, sh),
+                        resize_to: Size::new(sw, sh),
+                        canvas: Size::new(sw, sh),
                         placement: (0, 0),
                         canvas_color: self.canvas_color,
                     }
@@ -517,10 +533,10 @@ impl Constraint {
                     let aspect_crop = crop_to_aspect(sw, sh, tw, th, &self.gravity);
                     let combined = combine_crops(user_crop, aspect_crop);
                     Layout {
-                        source: (source_w, source_h),
+                        source: Size::new(source_w, source_h),
                         source_crop: Some(combined),
-                        resize_to: (tw, th),
-                        canvas: (tw, th),
+                        resize_to: Size::new(tw, th),
+                        canvas: Size::new(tw, th),
                         placement: (0, 0),
                         canvas_color: self.canvas_color,
                     }
@@ -545,10 +561,10 @@ impl Constraint {
                         user_crop
                     };
                     Layout {
-                        source: (source_w, source_h),
+                        source: Size::new(source_w, source_h),
                         source_crop: crop,
-                        resize_to: (rw, rh),
-                        canvas: (rw, rh),
+                        resize_to: Size::new(rw, rh),
+                        canvas: Size::new(rw, rh),
                         placement: (0, 0),
                         canvas_color: self.canvas_color,
                     }
@@ -559,10 +575,10 @@ impl Constraint {
                 let (rw, rh) = fit_inside(sw, sh, tw, th);
                 let (px, py) = gravity_offset(tw, th, rw, rh, &self.gravity);
                 Layout {
-                    source: (source_w, source_h),
+                    source: Size::new(source_w, source_h),
                     source_crop: user_crop,
-                    resize_to: (rw, rh),
-                    canvas: (tw, th),
+                    resize_to: Size::new(rw, rh),
+                    canvas: Size::new(tw, th),
                     placement: (px, py),
                     canvas_color: self.canvas_color,
                 }
@@ -575,10 +591,10 @@ impl Constraint {
                 // (no resize, no pad — identity).
                 if sw <= tw && sh <= th {
                     Layout {
-                        source: (source_w, source_h),
+                        source: Size::new(source_w, source_h),
                         source_crop: user_crop,
-                        resize_to: (sw, sh),
-                        canvas: (sw, sh),
+                        resize_to: Size::new(sw, sh),
+                        canvas: Size::new(sw, sh),
                         placement: (0, 0),
                         canvas_color: self.canvas_color,
                     }
@@ -586,10 +602,10 @@ impl Constraint {
                     let (rw, rh) = fit_inside(sw, sh, tw, th);
                     let (px, py) = gravity_offset(tw, th, rw, rh, &self.gravity);
                     Layout {
-                        source: (source_w, source_h),
+                        source: Size::new(source_w, source_h),
                         source_crop: user_crop,
-                        resize_to: (rw, rh),
-                        canvas: (tw, th),
+                        resize_to: Size::new(rw, rh),
+                        canvas: Size::new(tw, th),
                         placement: (px, py),
                         canvas_color: self.canvas_color,
                     }
@@ -600,10 +616,10 @@ impl Constraint {
                 let aspect_crop = crop_to_aspect(sw, sh, tw, th, &self.gravity);
                 let combined = combine_crops(user_crop, aspect_crop);
                 Layout {
-                    source: (source_w, source_h),
+                    source: Size::new(source_w, source_h),
                     source_crop: Some(combined),
-                    resize_to: (combined.width, combined.height),
-                    canvas: (combined.width, combined.height),
+                    resize_to: Size::new(combined.width, combined.height),
+                    canvas: Size::new(combined.width, combined.height),
                     placement: (0, 0),
                     canvas_color: self.canvas_color,
                 }
@@ -646,13 +662,13 @@ impl Constraint {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Layout {
     /// Original source dimensions.
-    pub source: (u32, u32),
+    pub source: Size,
     /// Region of source to use. `None` = full source.
     pub source_crop: Option<Rect>,
     /// Dimensions to resize the (cropped) source to.
-    pub resize_to: (u32, u32),
+    pub resize_to: Size,
     /// Final output canvas dimensions (≥ `resize_to`).
-    pub canvas: (u32, u32),
+    pub canvas: Size,
     /// Top-left offset where the resized image sits on the canvas.
     pub placement: (u32, u32),
     /// Canvas background color (for padding areas).
@@ -662,8 +678,8 @@ pub struct Layout {
 impl Layout {
     /// Whether resampling is needed (dimensions change).
     pub fn needs_resize(&self) -> bool {
-        let (sw, sh) = self.effective_source();
-        self.resize_to != (sw, sh)
+        let eff = self.effective_source();
+        self.resize_to != eff
     }
 
     /// Whether padding is needed (canvas larger than resized image).
@@ -677,9 +693,9 @@ impl Layout {
     }
 
     /// Effective source dimensions after crop.
-    pub fn effective_source(&self) -> (u32, u32) {
+    pub fn effective_source(&self) -> Size {
         match &self.source_crop {
-            Some(r) => (r.width, r.height),
+            Some(r) => Size::new(r.width, r.height),
             None => self.source,
         }
     }
@@ -687,7 +703,7 @@ impl Layout {
     /// Normalize: clear source_crop if it covers the full source.
     fn normalize(mut self) -> Self {
         if let Some(r) = &self.source_crop
-            && r.is_full(self.source.0, self.source.1)
+            && r.is_full(self.source.width, self.source.height)
         {
             self.source_crop = None;
         }
@@ -991,8 +1007,8 @@ mod tests {
         let l = Constraint::new(ConstraintMode::Distort, 400, 300)
             .compute(1000, 500)
             .unwrap();
-        assert_eq!(l.resize_to, (400, 300));
-        assert_eq!(l.canvas, (400, 300));
+        assert_eq!(l.resize_to, Size::new(400, 300));
+        assert_eq!(l.canvas, Size::new(400, 300));
         assert!(l.source_crop.is_none());
     }
 
@@ -1003,8 +1019,8 @@ mod tests {
         let l = Constraint::new(ConstraintMode::Fit, 400, 300)
             .compute(1000, 500)
             .unwrap();
-        assert_eq!(l.resize_to, (400, 200));
-        assert_eq!(l.canvas, (400, 200));
+        assert_eq!(l.resize_to, Size::new(400, 200));
+        assert_eq!(l.canvas, Size::new(400, 200));
         assert!(!l.needs_padding());
     }
 
@@ -1013,7 +1029,7 @@ mod tests {
         let l = Constraint::new(ConstraintMode::Fit, 400, 300)
             .compute(200, 100)
             .unwrap();
-        assert_eq!(l.resize_to, (400, 200));
+        assert_eq!(l.resize_to, Size::new(400, 200));
     }
 
     // ── ConstraintMode::Within ──────────────────────────────────────────
@@ -1024,7 +1040,7 @@ mod tests {
             .compute(200, 100)
             .unwrap();
         // Source fits within target → no resize.
-        assert_eq!(l.resize_to, (200, 100));
+        assert_eq!(l.resize_to, Size::new(200, 100));
         assert!(!l.needs_resize());
     }
 
@@ -1033,7 +1049,7 @@ mod tests {
         let l = Constraint::new(ConstraintMode::Within, 400, 300)
             .compute(1000, 500)
             .unwrap();
-        assert_eq!(l.resize_to, (400, 200));
+        assert_eq!(l.resize_to, Size::new(400, 200));
     }
 
     // ── ConstraintMode::FitCrop ─────────────────────────────────────────
@@ -1043,8 +1059,8 @@ mod tests {
         let l = Constraint::new(ConstraintMode::FitCrop, 400, 300)
             .compute(1000, 500)
             .unwrap();
-        assert_eq!(l.resize_to, (400, 300));
-        assert_eq!(l.canvas, (400, 300));
+        assert_eq!(l.resize_to, Size::new(400, 300));
+        assert_eq!(l.canvas, Size::new(400, 300));
         assert!(l.source_crop.is_some());
         let crop = l.source_crop.unwrap();
         // Source cropped to 4:3 aspect ratio.
@@ -1058,7 +1074,7 @@ mod tests {
         let l = Constraint::new(ConstraintMode::FitCrop, 400, 200)
             .compute(1000, 500)
             .unwrap();
-        assert_eq!(l.resize_to, (400, 200));
+        assert_eq!(l.resize_to, Size::new(400, 200));
         // Same aspect ratio → no crop needed (normalized to None).
         assert!(!l.needs_crop());
         assert!(l.source_crop.is_none());
@@ -1072,8 +1088,8 @@ mod tests {
             .compute(200, 100)
             .unwrap();
         // Source fits within target on both dims → identity (imageflow behavior).
-        assert_eq!(l.resize_to, (200, 100));
-        assert_eq!(l.canvas, (200, 100));
+        assert_eq!(l.resize_to, Size::new(200, 100));
+        assert_eq!(l.canvas, Size::new(200, 100));
         assert!(l.source_crop.is_none());
     }
 
@@ -1085,8 +1101,8 @@ mod tests {
             .canvas_color(CanvasColor::white())
             .compute(1000, 500)
             .unwrap();
-        assert_eq!(l.resize_to, (400, 200));
-        assert_eq!(l.canvas, (400, 300));
+        assert_eq!(l.resize_to, Size::new(400, 200));
+        assert_eq!(l.canvas, Size::new(400, 300));
         assert_eq!(l.placement, (0, 50)); // 50px top padding
         assert!(l.needs_padding());
     }
@@ -1096,8 +1112,8 @@ mod tests {
         let l = Constraint::new(ConstraintMode::FitPad, 400, 200)
             .compute(1000, 500)
             .unwrap();
-        assert_eq!(l.resize_to, (400, 200));
-        assert_eq!(l.canvas, (400, 200));
+        assert_eq!(l.resize_to, Size::new(400, 200));
+        assert_eq!(l.canvas, Size::new(400, 200));
         assert!(!l.needs_padding());
     }
 
@@ -1110,8 +1126,8 @@ mod tests {
             .canvas_color(CanvasColor::white())
             .compute(200, 100)
             .unwrap();
-        assert_eq!(l.resize_to, (200, 100));
-        assert_eq!(l.canvas, (200, 100));
+        assert_eq!(l.resize_to, Size::new(200, 100));
+        assert_eq!(l.canvas, Size::new(200, 100));
         assert!(!l.needs_resize());
         assert!(!l.needs_padding());
     }
@@ -1121,8 +1137,8 @@ mod tests {
         let l = Constraint::new(ConstraintMode::WithinPad, 400, 300)
             .compute(1000, 500)
             .unwrap();
-        assert_eq!(l.resize_to, (400, 200));
-        assert_eq!(l.canvas, (400, 300));
+        assert_eq!(l.resize_to, Size::new(400, 200));
+        assert_eq!(l.canvas, Size::new(400, 300));
         assert_eq!(l.placement, (0, 50));
     }
 
@@ -1135,7 +1151,7 @@ mod tests {
             .unwrap();
         let crop = l.source_crop.unwrap();
         // Crop to 4:3 from a 2:1 source, no scaling.
-        assert_eq!(l.resize_to, (crop.width, crop.height));
+        assert_eq!(l.resize_to, Size::new(crop.width, crop.height));
         assert!(!l.needs_resize());
     }
 
@@ -1156,7 +1172,7 @@ mod tests {
                 height: 500
             })
         );
-        assert_eq!(l.resize_to, (200, 200));
+        assert_eq!(l.resize_to, Size::new(200, 200));
     }
 
     #[test]
@@ -1240,7 +1256,7 @@ mod tests {
         let l = Constraint::width_only(ConstraintMode::Fit, 500)
             .compute(1000, 600)
             .unwrap();
-        assert_eq!(l.resize_to, (500, 300));
+        assert_eq!(l.resize_to, Size::new(500, 300));
     }
 
     #[test]
@@ -1248,7 +1264,7 @@ mod tests {
         let l = Constraint::height_only(ConstraintMode::Fit, 300)
             .compute(1000, 600)
             .unwrap();
-        assert_eq!(l.resize_to, (500, 300));
+        assert_eq!(l.resize_to, Size::new(500, 300));
     }
 
     #[test]
@@ -1278,7 +1294,7 @@ mod tests {
             .gravity(Gravity::Percentage(1.0, 1.0))
             .compute(1000, 500)
             .unwrap();
-        assert_eq!(l.resize_to, (400, 200));
+        assert_eq!(l.resize_to, Size::new(400, 200));
         assert_eq!(l.placement, (0, 200));
     }
 
@@ -1371,10 +1387,10 @@ mod tests {
                 let layout = Constraint::width_only(ConstraintMode::Fit, tw)
                     .compute(ow, oh)
                     .unwrap();
-                if layout.resize_to.0 != tw {
+                if layout.resize_to.width != tw {
                     failures.push(format!(
                         "case {i}: ({ow}x{oh}, w={tw}) -> resize_to.0={}, expected {tw}",
-                        layout.resize_to.0
+                        layout.resize_to.width
                     ));
                 }
                 if layout.source_crop.is_some() {
@@ -1387,10 +1403,10 @@ mod tests {
                 let layout = Constraint::height_only(ConstraintMode::Fit, th)
                     .compute(ow, oh)
                     .unwrap();
-                if layout.resize_to.1 != th {
+                if layout.resize_to.height != th {
                     failures.push(format!(
                         "case {i}: ({ow}x{oh}, h={th}) -> resize_to.1={}, expected {th}",
-                        layout.resize_to.1
+                        layout.resize_to.height
                     ));
                 }
                 if layout.source_crop.is_some() {
@@ -1487,8 +1503,14 @@ mod tests {
                             continue;
                         }
                     };
-                    let (rw, rh) = layout.resize_to;
-                    let (cw, ch) = layout.canvas;
+                    let Size {
+                        width: rw,
+                        height: rh,
+                    } = layout.resize_to;
+                    let Size {
+                        width: cw,
+                        height: ch,
+                    } = layout.canvas;
                     let (px, py) = layout.placement;
                     let tag = format!("{mode:?} ({sw}x{sh} -> {tw}x{th})");
 
@@ -1702,7 +1724,7 @@ mod tests {
         let l = Constraint::new(ConstraintMode::Fit, 100, 33)
             .compute(1200, 400)
             .unwrap();
-        assert_eq!(l.resize_to, (100, 33));
+        assert_eq!(l.resize_to, Size::new(100, 33));
         assert!(l.source_crop.is_none());
     }
 
@@ -1711,8 +1733,8 @@ mod tests {
         let l = Constraint::new(ConstraintMode::FitCrop, 100, 33)
             .compute(1200, 400)
             .unwrap();
-        assert_eq!(l.resize_to, (100, 33));
-        assert_eq!(l.canvas, (100, 33));
+        assert_eq!(l.resize_to, Size::new(100, 33));
+        assert_eq!(l.canvas, Size::new(100, 33));
     }
 
     #[test]
@@ -1720,8 +1742,8 @@ mod tests {
         let l = Constraint::new(ConstraintMode::FitCrop, 200, 133)
             .compute(638, 423)
             .unwrap();
-        assert_eq!(l.resize_to, (200, 133));
-        assert_eq!(l.canvas, (200, 133));
+        assert_eq!(l.resize_to, Size::new(200, 133));
+        assert_eq!(l.canvas, Size::new(200, 133));
     }
 
     #[test]
@@ -1729,9 +1751,9 @@ mod tests {
         let l = Constraint::new(ConstraintMode::Fit, 1, 3)
             .compute(2, 4)
             .unwrap();
-        assert!(l.resize_to.0 <= 1);
-        assert!(l.resize_to.1 <= 3);
-        assert!(l.resize_to.0 == 1 || l.resize_to.1 == 3);
+        assert!(l.resize_to.width <= 1);
+        assert!(l.resize_to.height <= 3);
+        assert!(l.resize_to.width == 1 || l.resize_to.height == 3);
     }
 
     #[test]
@@ -1739,8 +1761,8 @@ mod tests {
         let l = Constraint::new(ConstraintMode::FitCrop, 1, 3)
             .compute(2, 4)
             .unwrap();
-        assert_eq!(l.resize_to, (1, 3));
-        assert_eq!(l.canvas, (1, 3));
+        assert_eq!(l.resize_to, Size::new(1, 3));
+        assert_eq!(l.canvas, Size::new(1, 3));
     }
 
     #[test]
@@ -1748,7 +1770,7 @@ mod tests {
         let l = Constraint::width_only(ConstraintMode::Fit, 399)
             .compute(1399, 5)
             .unwrap();
-        assert_eq!(l.resize_to.0, 399);
+        assert_eq!(l.resize_to.width, 399);
         assert!(l.source_crop.is_none());
     }
 
@@ -1757,7 +1779,7 @@ mod tests {
         let l = Constraint::height_only(ConstraintMode::Fit, 399)
             .compute(5, 1399)
             .unwrap();
-        assert_eq!(l.resize_to.1, 399);
+        assert_eq!(l.resize_to.height, 399);
         assert!(l.source_crop.is_none());
     }
 
@@ -1766,8 +1788,8 @@ mod tests {
         let l = Constraint::new(ConstraintMode::Fit, 100, 33)
             .compute(1621, 883)
             .unwrap();
-        assert!(l.resize_to.0 <= 100 && l.resize_to.1 <= 33);
-        assert!(l.resize_to.0 == 100 || l.resize_to.1 == 33);
+        assert!(l.resize_to.width <= 100 && l.resize_to.height <= 33);
+        assert!(l.resize_to.width == 100 || l.resize_to.height == 33);
     }
 
     #[test]
@@ -1775,8 +1797,8 @@ mod tests {
         let l = Constraint::new(ConstraintMode::Fit, 512, 512)
             .compute(971, 967)
             .unwrap();
-        assert!(l.resize_to.0 <= 512 && l.resize_to.1 <= 512);
-        assert!(l.resize_to.0 == 512 || l.resize_to.1 == 512);
+        assert!(l.resize_to.width <= 512 && l.resize_to.height <= 512);
+        assert!(l.resize_to.width == 512 || l.resize_to.height == 512);
     }
 
     #[test]
@@ -1784,7 +1806,7 @@ mod tests {
         let l = Constraint::new(ConstraintMode::Fit, 1, 1)
             .compute(1000, 500)
             .unwrap();
-        assert_eq!(l.resize_to, (1, 1));
+        assert_eq!(l.resize_to, Size::new(1, 1));
     }
 
     #[test]
@@ -1792,8 +1814,8 @@ mod tests {
         let l = Constraint::new(ConstraintMode::FitCrop, 1, 1)
             .compute(1000, 500)
             .unwrap();
-        assert_eq!(l.resize_to, (1, 1));
-        assert_eq!(l.canvas, (1, 1));
+        assert_eq!(l.resize_to, Size::new(1, 1));
+        assert_eq!(l.canvas, Size::new(1, 1));
     }
 
     #[test]
@@ -1801,8 +1823,8 @@ mod tests {
         let l = Constraint::new(ConstraintMode::FitPad, 1, 1)
             .compute(1000, 500)
             .unwrap();
-        assert_eq!(l.canvas, (1, 1));
-        assert!(l.resize_to.0 <= 1 && l.resize_to.1 <= 1);
+        assert_eq!(l.canvas, Size::new(1, 1));
+        assert!(l.resize_to.width <= 1 && l.resize_to.height <= 1);
     }
 
     #[test]
@@ -1810,7 +1832,7 @@ mod tests {
         let l = Constraint::new(ConstraintMode::Fit, 100, 100)
             .compute(100, 100)
             .unwrap();
-        assert_eq!(l.resize_to, (100, 100));
+        assert_eq!(l.resize_to, Size::new(100, 100));
         assert!(!l.needs_resize());
     }
 
@@ -1819,7 +1841,7 @@ mod tests {
         let l = Constraint::new(ConstraintMode::FitCrop, 100, 100)
             .compute(100, 100)
             .unwrap();
-        assert_eq!(l.resize_to, (100, 100));
+        assert_eq!(l.resize_to, Size::new(100, 100));
         assert!(l.source_crop.is_none());
     }
 
@@ -1834,7 +1856,7 @@ mod tests {
             let l = Constraint::new(mode, 400, 300).compute(50, 30).unwrap();
             let tag = format!("{mode:?}");
             assert!(
-                l.resize_to.0 <= 50 && l.resize_to.1 <= 30,
+                l.resize_to.width <= 50 && l.resize_to.height <= 30,
                 "{tag}: upscaled to {:?}",
                 l.resize_to
             );
@@ -1846,7 +1868,7 @@ mod tests {
         let l = Constraint::width_only(ConstraintMode::Fit, 280)
             .compute(1399, 697)
             .unwrap();
-        assert_eq!(l.resize_to.0, 280);
+        assert_eq!(l.resize_to.width, 280);
         assert!(l.source_crop.is_none());
     }
 
@@ -1855,7 +1877,7 @@ mod tests {
         let l = Constraint::height_only(ConstraintMode::Fit, 280)
             .compute(697, 1399)
             .unwrap();
-        assert_eq!(l.resize_to.1, 280);
+        assert_eq!(l.resize_to.height, 280);
         assert!(l.source_crop.is_none());
     }
 
@@ -1881,8 +1903,8 @@ mod tests {
             .source_crop(SourceCrop::percent(0.0, 0.0, 0.5, 0.5))
             .compute(1000, 1000)
             .unwrap();
-        assert_eq!(l.resize_to, (100, 10));
-        assert_eq!(l.canvas, (100, 10));
+        assert_eq!(l.resize_to, Size::new(100, 10));
+        assert_eq!(l.canvas, Size::new(100, 10));
         let crop = l.source_crop.unwrap();
         assert!(crop.width <= 500);
         assert!(crop.height <= 500);
@@ -1894,7 +1916,7 @@ mod tests {
             .source_crop(SourceCrop::pixels(500, 500, 1, 1))
             .compute(1000, 1000)
             .unwrap();
-        assert_eq!(l.resize_to, (200, 200));
+        assert_eq!(l.resize_to, Size::new(200, 200));
     }
 
     #[test]
@@ -1940,16 +1962,16 @@ mod tests {
         let l = Constraint::new(ConstraintMode::WithinPad, 103, 103)
             .compute(100, 100)
             .unwrap();
-        assert_eq!(l.canvas, (100, 100));
-        assert_eq!(l.resize_to, (100, 100));
+        assert_eq!(l.canvas, Size::new(100, 100));
+        assert_eq!(l.resize_to, Size::new(100, 100));
         assert_eq!(l.placement, (0, 0));
 
         // FitPad DOES pad when aspect differs and source < target:
         let l = Constraint::new(ConstraintMode::FitPad, 103, 200)
             .compute(100, 100)
             .unwrap();
-        assert_eq!(l.canvas, (103, 200));
-        assert_eq!(l.resize_to, (103, 103));
+        assert_eq!(l.canvas, Size::new(103, 200));
+        assert_eq!(l.resize_to, Size::new(103, 103));
         // Center vertically: (200-103)/2 = 48
         assert_eq!(l.placement, (0, 48));
     }
@@ -1969,8 +1991,8 @@ mod tests {
             .gravity(Gravity::Percentage(2.0, 2.0))
             .compute(1000, 500)
             .unwrap();
-        let max_x = 400 - l.resize_to.0;
-        let max_y = 400 - l.resize_to.1;
+        let max_x = 400 - l.resize_to.width;
+        let max_y = 400 - l.resize_to.height;
         assert_eq!(l.placement, (max_x, max_y));
     }
 
@@ -2364,8 +2386,8 @@ mod tests {
         let layout = oracle::Layout::create(source, target).execute_all(&steps);
 
         // Oracle results
-        let oracle_image = (layout.image.w as u32, layout.image.h as u32);
-        let oracle_canvas = (layout.canvas.w as u32, layout.canvas.h as u32);
+        let oracle_image = Size::new(layout.image.w as u32, layout.image.h as u32);
+        let oracle_canvas = Size::new(layout.canvas.w as u32, layout.canvas.h as u32);
         let oracle_crop = (layout.source.w as u32, layout.source.h as u32);
 
         // --- Zenlayout ---

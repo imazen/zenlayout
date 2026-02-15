@@ -17,7 +17,7 @@ pub mod plan;
 
 // Re-exports: core types from constraint module
 pub use constraint::{
-    CanvasColor, Constraint, ConstraintMode, Gravity, Layout, LayoutError, Rect, SourceCrop,
+    CanvasColor, Constraint, ConstraintMode, Gravity, Layout, LayoutError, Rect, Size, SourceCrop,
 };
 pub use orientation::Orientation;
 pub use plan::{
