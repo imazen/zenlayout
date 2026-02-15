@@ -149,19 +149,183 @@ pub struct LayoutPlan {
 }
 
 /// How to align canvas dimensions to codec-required multiples.
+///
+/// Both variants take `(x_align, y_align)` for per-axis alignment.
+/// Use [`Subsampling::mcu_align()`] for JPEG MCU-aligned extend.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Align {
-    /// Round canvas down to nearest multiple. May lose up to `(n-1)` pixels per axis.
+    /// Round canvas down to nearest multiple per axis. May lose pixels.
     /// Use for video codecs (mod-2) where pixel-exact dimensions aren't critical.
-    RoundDown(u32),
-    /// Extend canvas up to nearest multiple. Image placed at `(0, 0)`, renderer
-    /// replicates edge pixels into the extension area. Original content dimensions
-    /// stored in [`IdealLayout::encode_crop`] / [`LayoutPlan::encode_crop`] for
-    /// post-encode cropping. No content loss.
+    RoundDown(u32, u32),
+    /// Extend canvas up to nearest multiple per axis. Image placed at `(0, 0)`,
+    /// renderer replicates edge pixels into the extension area. Original content
+    /// dimensions stored in [`IdealLayout::encode_crop`] / [`LayoutPlan::encode_crop`].
+    /// No content loss.
+    Extend(u32, u32),
+}
+
+impl Align {
+    /// Uniform alignment (same for both axes).
+    pub const fn uniform_down(n: u32) -> Self {
+        Self::RoundDown(n, n)
+    }
+
+    /// Uniform extend alignment (same for both axes).
+    pub const fn uniform_extend(n: u32) -> Self {
+        Self::Extend(n, n)
+    }
+}
+
+/// Chroma subsampling scheme.
+///
+/// Describes the relationship between luma and chroma plane dimensions.
+/// Use [`Subsampling::mcu_align()`] to get the [`Align`] needed for JPEG encoding.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Subsampling {
+    /// 4:4:4 — no subsampling. Chroma same size as luma. MCU = 8×8.
+    S444,
+    /// 4:2:2 — chroma half width, full height. MCU = 16×8.
+    S422,
+    /// 4:2:0 — chroma half width and height. MCU = 16×16.
+    S420,
+}
+
+impl Subsampling {
+    /// Horizontal and vertical subsampling factors.
     ///
-    /// This is how JPEG MCU padding works — encode at extended size, store real
-    /// dimensions in the header, decoders crop automatically.
-    Extend(u32),
+    /// Returns `(h, v)` where chroma dimensions = luma dimensions / factor.
+    pub const fn factors(self) -> (u32, u32) {
+        match self {
+            Self::S444 => (1, 1),
+            Self::S422 => (2, 1),
+            Self::S420 => (2, 2),
+        }
+    }
+
+    /// MCU dimensions in luma pixels for this subsampling scheme.
+    pub const fn mcu_size(self) -> (u32, u32) {
+        let (h, v) = self.factors();
+        (8 * h, 8 * v)
+    }
+
+    /// [`Align::Extend`] for JPEG MCU alignment with this subsampling.
+    ///
+    /// Use with [`MandatoryConstraints::align`] to extend the canvas to
+    /// MCU boundaries with edge replication.
+    pub const fn mcu_align(self) -> Align {
+        let (mcu_w, mcu_h) = self.mcu_size();
+        Align::Extend(mcu_w, mcu_h)
+    }
+}
+
+/// Geometry for a single image plane (luma or chroma).
+///
+/// All dimensions in pixels. Block size is always 8×8 (DCT block).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PlaneLayout {
+    /// Content dimensions in pixels.
+    pub content: (u32, u32),
+    /// Allocated/encoded dimensions (extended to block boundary).
+    pub extended: (u32, u32),
+    /// Number of 8×8 blocks per row.
+    pub blocks_w: u32,
+    /// Number of 8×8 blocks per column.
+    pub blocks_h: u32,
+}
+
+/// Codec-ready geometry for a YCbCr image.
+///
+/// Computed from canvas dimensions + subsampling scheme. Provides everything
+/// a JPEG or video encoder needs for direct streaming without buffering:
+/// per-plane dimensions, block/MCU grid, and row group size.
+///
+/// # Example
+///
+/// ```
+/// use zenlayout::{Pipeline, Subsampling, CodecLayout, MandatoryConstraints};
+///
+/// let (ideal, _) = Pipeline::new(4000, 3000)
+///     .fit(800, 600)
+///     .limits(MandatoryConstraints {
+///         align: Some(Subsampling::S420.mcu_align()),
+///         ..Default::default()
+///     })
+///     .plan()
+///     .unwrap();
+///
+/// let codec = CodecLayout::new(ideal.layout.canvas, Subsampling::S420);
+/// assert_eq!(codec.mcu_size, (16, 16));
+/// assert_eq!(codec.luma.extended, ideal.layout.canvas);
+/// assert_eq!(codec.chroma.extended, (400, 304));
+/// // Feed resize output in chunks of codec.luma_rows_per_mcu rows
+/// assert_eq!(codec.luma_rows_per_mcu, 16);
+/// ```
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CodecLayout {
+    /// Luma (Y) plane layout.
+    pub luma: PlaneLayout,
+    /// Chroma (Cb, Cr) plane layout — both chroma planes share this geometry.
+    pub chroma: PlaneLayout,
+    /// Subsampling scheme.
+    pub subsampling: Subsampling,
+    /// MCU dimensions in luma pixels.
+    pub mcu_size: (u32, u32),
+    /// MCUs per row.
+    pub mcu_cols: u32,
+    /// MCU rows.
+    pub mcu_rows: u32,
+    /// Luma rows per MCU row — feed this many rows at a time from the
+    /// resize engine to the encoder to avoid intermediate buffering.
+    pub luma_rows_per_mcu: u32,
+}
+
+impl CodecLayout {
+    /// Compute codec geometry from canvas dimensions and subsampling.
+    ///
+    /// Canvas should already be aligned (use [`Subsampling::mcu_align()`] with
+    /// [`MandatoryConstraints`]). If not aligned, dimensions are rounded up
+    /// internally.
+    pub fn new(canvas: (u32, u32), subsampling: Subsampling) -> Self {
+        let (w, h) = canvas;
+        let (h_factor, v_factor) = subsampling.factors();
+        let (mcu_w, mcu_h) = subsampling.mcu_size();
+
+        // Extend to MCU boundary (should already be aligned if using mcu_align).
+        let ext_w = w.div_ceil(mcu_w) * mcu_w;
+        let ext_h = h.div_ceil(mcu_h) * mcu_h;
+
+        let mcu_cols = ext_w / mcu_w;
+        let mcu_rows = ext_h / mcu_h;
+
+        let luma = PlaneLayout {
+            content: (w, h),
+            extended: (ext_w, ext_h),
+            blocks_w: ext_w / 8,
+            blocks_h: ext_h / 8,
+        };
+
+        let chroma_content_w = w.div_ceil(h_factor);
+        let chroma_content_h = h.div_ceil(v_factor);
+        let chroma_ext_w = ext_w / h_factor;
+        let chroma_ext_h = ext_h / v_factor;
+
+        let chroma = PlaneLayout {
+            content: (chroma_content_w, chroma_content_h),
+            extended: (chroma_ext_w, chroma_ext_h),
+            blocks_w: chroma_ext_w / 8,
+            blocks_h: chroma_ext_h / 8,
+        };
+
+        Self {
+            luma,
+            chroma,
+            subsampling,
+            mcu_size: (mcu_w, mcu_h),
+            mcu_cols,
+            mcu_rows,
+            luma_rows_per_mcu: mcu_h,
+        }
+    }
 }
 
 /// Post-computation safety limits applied after all layout computation.
@@ -237,11 +401,11 @@ impl MandatoryConstraints {
             }
         }
 
-        // 3. Align canvas to multiples.
+        // 3. Align canvas to multiples (per-axis).
         let encode_crop = match self.align {
-            Some(Align::RoundDown(n)) if n > 1 => {
-                let cw = (layout.canvas.0 / n).max(1) * n;
-                let ch = (layout.canvas.1 / n).max(1) * n;
+            Some(Align::RoundDown(nx, ny)) if nx > 1 || ny > 1 => {
+                let cw = if nx > 1 { (layout.canvas.0 / nx).max(1) * nx } else { layout.canvas.0 };
+                let ch = if ny > 1 { (layout.canvas.1 / ny).max(1) * ny } else { layout.canvas.1 };
                 layout.canvas = (cw, ch);
 
                 // resize_to can't exceed canvas.
@@ -257,13 +421,12 @@ impl MandatoryConstraints {
                 );
                 None
             }
-            Some(Align::Extend(n)) if n > 1 => {
+            Some(Align::Extend(nx, ny)) if nx > 1 || ny > 1 => {
                 let (ow, oh) = layout.canvas;
-                let cw = ow.div_ceil(n) * n;
-                let ch = oh.div_ceil(n) * n;
+                let cw = if nx > 1 { ow.div_ceil(nx) * nx } else { ow };
+                let ch = if ny > 1 { oh.div_ceil(ny) * ny } else { oh };
 
                 if cw != ow || ch != oh {
-                    // Image at (0,0), extend right/bottom with edge replication.
                     layout.placement = (0, 0);
                     layout.canvas = (cw, ch);
                     Some((ow, oh))
@@ -2789,7 +2952,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(1000, 667)
             .fit(1000, 667)
             .limits(MandatoryConstraints {
-                align: Some(Align::RoundDown(16)),
+                align: Some(Align::RoundDown(16, 16)),
                 ..Default::default()
             })
             .plan()
@@ -2805,7 +2968,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(801, 601)
             .fit(801, 601)
             .limits(MandatoryConstraints {
-                align: Some(Align::RoundDown(2)),
+                align: Some(Align::RoundDown(2, 2)),
                 ..Default::default()
             })
             .plan()
@@ -2820,7 +2983,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(800, 600)
             .fit_pad(400, 400)
             .limits(MandatoryConstraints {
-                align: Some(Align::RoundDown(16)),
+                align: Some(Align::RoundDown(16, 16)),
                 ..Default::default()
             })
             .plan()
@@ -2838,7 +3001,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(800, 600)
             .fit_pad(401, 401)
             .limits(MandatoryConstraints {
-                align: Some(Align::RoundDown(16)),
+                align: Some(Align::RoundDown(16, 16)),
                 ..Default::default()
             })
             .plan()
@@ -2855,7 +3018,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(801, 601)
             .fit(801, 601)
             .limits(MandatoryConstraints {
-                align: Some(Align::RoundDown(1)),
+                align: Some(Align::RoundDown(1, 1)),
                 ..Default::default()
             })
             .plan()
@@ -2872,7 +3035,7 @@ mod tests {
             .limits(MandatoryConstraints {
                 max: Some((1920, 1080)),
                 min: Some((100, 100)),
-                align: Some(Align::RoundDown(8)),
+                align: Some(Align::RoundDown(8, 8)),
             })
             .plan()
             .unwrap();
@@ -2921,7 +3084,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(3, 3)
             .fit(3, 3)
             .limits(MandatoryConstraints {
-                align: Some(Align::RoundDown(16)),
+                align: Some(Align::RoundDown(16, 16)),
                 ..Default::default()
             })
             .plan()
@@ -2987,7 +3150,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(801, 601)
             .fit(801, 601)
             .limits(MandatoryConstraints {
-                align: Some(Align::Extend(16)),
+                align: Some(Align::Extend(16, 16)),
                 ..Default::default()
             })
             .plan()
@@ -3004,7 +3167,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(800, 640)
             .fit(800, 640)
             .limits(MandatoryConstraints {
-                align: Some(Align::Extend(16)),
+                align: Some(Align::Extend(16, 16)),
                 ..Default::default()
             })
             .plan()
@@ -3019,7 +3182,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(801, 601)
             .fit(801, 601)
             .limits(MandatoryConstraints {
-                align: Some(Align::Extend(2)),
+                align: Some(Align::Extend(2, 2)),
                 ..Default::default()
             })
             .plan()
@@ -3034,7 +3197,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(100, 100)
             .fit(100, 100)
             .limits(MandatoryConstraints {
-                align: Some(Align::Extend(8)),
+                align: Some(Align::Extend(8, 8)),
                 ..Default::default()
             })
             .plan()
@@ -3050,7 +3213,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(800, 600)
             .fit_pad(400, 400)
             .limits(MandatoryConstraints {
-                align: Some(Align::Extend(16)),
+                align: Some(Align::Extend(16, 16)),
                 ..Default::default()
             })
             .plan()
@@ -3066,7 +3229,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(800, 600)
             .fit_pad(401, 401)
             .limits(MandatoryConstraints {
-                align: Some(Align::Extend(16)),
+                align: Some(Align::Extend(16, 16)),
                 ..Default::default()
             })
             .plan()
@@ -3082,7 +3245,7 @@ mod tests {
         let (ideal, req) = Pipeline::new(801, 601)
             .fit(801, 601)
             .limits(MandatoryConstraints {
-                align: Some(Align::Extend(16)),
+                align: Some(Align::Extend(16, 16)),
                 ..Default::default()
             })
             .plan()
@@ -3101,7 +3264,7 @@ mod tests {
             .fit(4000, 3000)
             .limits(MandatoryConstraints {
                 max: Some((1920, 1080)),
-                align: Some(Align::Extend(16)),
+                align: Some(Align::Extend(16, 16)),
                 ..Default::default()
             })
             .plan()
@@ -3115,5 +3278,165 @@ mod tests {
             assert!(cw <= 1920);
             assert!(ch <= 1080);
         }
+    }
+
+    // ── Per-axis alignment ──────────────────────────────────────────────
+
+    #[test]
+    fn align_per_axis_extend_422() {
+        // 4:2:2: MCU is 16×8. 801×601 → extend to 816×608
+        let (ideal, _) = Pipeline::new(801, 601)
+            .fit(801, 601)
+            .limits(MandatoryConstraints {
+                align: Some(Align::Extend(16, 8)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, (816, 608));
+        assert_eq!(ideal.encode_crop, Some((801, 601)));
+    }
+
+    #[test]
+    fn align_per_axis_extend_420() {
+        // 4:2:0: MCU is 16×16. 801×601 → extend to 816×608 (y mod-16: 608)
+        // Wait, 601 div_ceil 16 = 38, 38*16 = 608. So 816×608.
+        // Hmm no: for 4:2:0, MCU is 16×16. 601/16 = 37.5625, ceil = 38, 38*16 = 608.
+        let (ideal, _) = Pipeline::new(801, 601)
+            .fit(801, 601)
+            .limits(MandatoryConstraints {
+                align: Some(Subsampling::S420.mcu_align()),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, (816, 608));
+        assert_eq!(ideal.layout.canvas.0 % 16, 0);
+        assert_eq!(ideal.layout.canvas.1 % 16, 0);
+    }
+
+    #[test]
+    fn align_per_axis_rounddown_different() {
+        // Round down: x mod-16, y mod-8. 801×601 → 800×600
+        let (ideal, _) = Pipeline::new(801, 601)
+            .fit(801, 601)
+            .limits(MandatoryConstraints {
+                align: Some(Align::RoundDown(16, 8)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas.0 % 16, 0);
+        assert_eq!(ideal.layout.canvas.1 % 8, 0);
+        assert_eq!(ideal.layout.canvas, (800, 600));
+    }
+
+    #[test]
+    fn subsampling_mcu_align_444() {
+        // 4:4:4: MCU is 8×8
+        let align = Subsampling::S444.mcu_align();
+        assert_eq!(align, Align::Extend(8, 8));
+    }
+
+    #[test]
+    fn subsampling_mcu_align_422() {
+        let align = Subsampling::S422.mcu_align();
+        assert_eq!(align, Align::Extend(16, 8));
+    }
+
+    #[test]
+    fn subsampling_mcu_align_420() {
+        let align = Subsampling::S420.mcu_align();
+        assert_eq!(align, Align::Extend(16, 16));
+    }
+
+    // ── CodecLayout ─────────────────────────────────────────────────────
+
+    #[test]
+    fn codec_layout_420_aligned() {
+        // 800×608, already MCU-aligned for 4:2:0
+        let cl = CodecLayout::new((800, 608), Subsampling::S420);
+        assert_eq!(cl.mcu_size, (16, 16));
+        assert_eq!(cl.luma.extended, (800, 608));
+        assert_eq!(cl.luma.content, (800, 608));
+        assert_eq!(cl.chroma.extended, (400, 304));
+        assert_eq!(cl.chroma.content, (400, 304));
+        assert_eq!(cl.mcu_cols, 50);
+        assert_eq!(cl.mcu_rows, 38);
+        assert_eq!(cl.luma_rows_per_mcu, 16);
+        assert_eq!(cl.luma.blocks_w, 100);
+        assert_eq!(cl.luma.blocks_h, 76);
+        assert_eq!(cl.chroma.blocks_w, 50);
+        assert_eq!(cl.chroma.blocks_h, 38);
+    }
+
+    #[test]
+    fn codec_layout_422() {
+        let cl = CodecLayout::new((800, 600), Subsampling::S422);
+        assert_eq!(cl.mcu_size, (16, 8));
+        assert_eq!(cl.luma.extended, (800, 600));
+        assert_eq!(cl.chroma.extended, (400, 600));
+        assert_eq!(cl.luma_rows_per_mcu, 8);
+        assert_eq!(cl.mcu_cols, 50);
+        assert_eq!(cl.mcu_rows, 75);
+    }
+
+    #[test]
+    fn codec_layout_444() {
+        let cl = CodecLayout::new((800, 600), Subsampling::S444);
+        assert_eq!(cl.mcu_size, (8, 8));
+        assert_eq!(cl.luma.extended, (800, 600));
+        assert_eq!(cl.chroma.extended, (800, 600)); // same as luma
+        assert_eq!(cl.luma_rows_per_mcu, 8);
+    }
+
+    #[test]
+    fn codec_layout_unaligned_extends_internally() {
+        // 801×601 with 4:2:0 — CodecLayout rounds up internally
+        let cl = CodecLayout::new((801, 601), Subsampling::S420);
+        assert_eq!(cl.luma.content, (801, 601));
+        assert_eq!(cl.luma.extended, (816, 608));
+        assert_eq!(cl.chroma.content, (401, 301));
+        assert_eq!(cl.chroma.extended, (408, 304));
+    }
+
+    #[test]
+    fn codec_layout_pipeline_integration() {
+        // Full pipeline: resize → align → codec layout
+        let (ideal, _) = Pipeline::new(4000, 3000)
+            .auto_orient(6) // 90° → 3000×4000
+            .fit(600, 800)
+            .limits(MandatoryConstraints {
+                align: Some(Subsampling::S420.mcu_align()),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+
+        let cl = CodecLayout::new(ideal.layout.canvas, Subsampling::S420);
+
+        // Canvas is MCU-aligned
+        assert_eq!(ideal.layout.canvas.0 % 16, 0);
+        assert_eq!(ideal.layout.canvas.1 % 16, 0);
+
+        // CodecLayout agrees with canvas
+        assert_eq!(cl.luma.extended, ideal.layout.canvas);
+
+        // Chroma is exactly half
+        assert_eq!(cl.chroma.extended.0, cl.luma.extended.0 / 2);
+        assert_eq!(cl.chroma.extended.1, cl.luma.extended.1 / 2);
+
+        // Streaming: feed 16 rows at a time
+        assert_eq!(cl.luma_rows_per_mcu, 16);
+    }
+
+    #[test]
+    fn codec_layout_1x1() {
+        // Tiny image: 1×1 with 4:2:0 → MCU 16×16
+        let cl = CodecLayout::new((1, 1), Subsampling::S420);
+        assert_eq!(cl.luma.extended, (16, 16));
+        assert_eq!(cl.chroma.extended, (8, 8));
+        assert_eq!(cl.mcu_cols, 1);
+        assert_eq!(cl.mcu_rows, 1);
     }
 }
