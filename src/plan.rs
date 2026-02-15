@@ -765,7 +765,7 @@ impl Pipeline {
 impl IdealLayout {
     /// Finalize layout after decoder reports what it actually did.
     ///
-    /// Convenience method — equivalent to calling [`finalize()`].
+    /// Convenience method for the finalize step of two-phase layout.
     pub fn finalize(&self, request: &DecoderRequest, offer: &DecoderOffer) -> LayoutPlan {
         finalize(self, request, offer)
     }
@@ -779,8 +779,8 @@ impl IdealLayout {
     ///
     /// The secondary plane goes through the same two-phase negotiation as the
     /// primary: send the `DecoderRequest` to the secondary decoder, get back a
-    /// `DecoderOffer`, and call [`finalize()`] to compute remaining work.
-    /// Each decoder independently handles what it can; `finalize()` compensates.
+    /// `DecoderOffer`, and call [`IdealLayout::finalize()`] to compute remaining work.
+    /// Each decoder independently handles what it can; finalize compensates.
     ///
     /// # Arguments
     ///
