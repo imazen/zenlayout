@@ -64,13 +64,84 @@ pub enum Gravity {
 }
 
 /// Canvas background color for pad modes.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+///
+/// `Srgb` is for user-facing colors in standard sRGB. `Linear` is for callers
+/// already working in linear light (avoids unnecessary color space round-trips
+/// during resize). Both carry alpha.
+#[derive(Copy, Clone, Debug, Default)]
 pub enum CanvasColor {
     /// Transparent black `[0, 0, 0, 0]`.
     #[default]
     Transparent,
-    /// sRGB color with alpha.
+    /// sRGB color with alpha (8-bit per channel).
     Srgb { r: u8, g: u8, b: u8, a: u8 },
+    /// Linear RGB color with alpha (unspecified color space).
+    Linear { r: f32, g: f32, b: f32, a: f32 },
+}
+
+impl PartialEq for CanvasColor {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Transparent, Self::Transparent) => true,
+            (
+                Self::Srgb {
+                    r: r1,
+                    g: g1,
+                    b: b1,
+                    a: a1,
+                },
+                Self::Srgb {
+                    r: r2,
+                    g: g2,
+                    b: b2,
+                    a: a2,
+                },
+            ) => r1 == r2 && g1 == g2 && b1 == b2 && a1 == a2,
+            (
+                Self::Linear {
+                    r: r1,
+                    g: g1,
+                    b: b1,
+                    a: a1,
+                },
+                Self::Linear {
+                    r: r2,
+                    g: g2,
+                    b: b2,
+                    a: a2,
+                },
+            ) => {
+                r1.to_bits() == r2.to_bits()
+                    && g1.to_bits() == g2.to_bits()
+                    && b1.to_bits() == b2.to_bits()
+                    && a1.to_bits() == a2.to_bits()
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for CanvasColor {}
+
+impl core::hash::Hash for CanvasColor {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        core::mem::discriminant(self).hash(state);
+        match self {
+            Self::Transparent => {}
+            Self::Srgb { r, g, b, a } => {
+                r.hash(state);
+                g.hash(state);
+                b.hash(state);
+                a.hash(state);
+            }
+            Self::Linear { r, g, b, a } => {
+                r.to_bits().hash(state);
+                g.to_bits().hash(state);
+                b.to_bits().hash(state);
+                a.to_bits().hash(state);
+            }
+        }
+    }
 }
 
 impl CanvasColor {
