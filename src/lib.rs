@@ -21,6 +21,6 @@ pub use constraint::{
 };
 pub use orientation::Orientation;
 pub use plan::{
-    Command, DecoderOffer, DecoderRequest, FlipAxis, IdealLayout, LayoutPlan,
+    Align, Command, DecoderOffer, DecoderRequest, FlipAxis, IdealLayout, LayoutPlan,
     MandatoryConstraints, Padding, Pipeline, Rotation, finalize, plan,
 };

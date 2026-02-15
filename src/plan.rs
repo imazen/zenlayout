@@ -71,6 +71,9 @@ pub struct IdealLayout {
     pub source_crop: Option<Rect>,
     /// Padding to add around the final image.
     pub padding: Option<Padding>,
+    /// If [`Align::Extend`] was used, crop to these dimensions after encoding.
+    /// Canvas was extended with replicated edges; this records the real content size.
+    pub encode_crop: Option<(u32, u32)>,
 }
 
 /// Explicit padding specification.
@@ -132,7 +135,7 @@ pub struct LayoutPlan {
     pub resize_to: (u32, u32),
     /// Orientation remaining after decoder's contribution.
     pub remaining_orientation: Orientation,
-    /// Final canvas dimensions.
+    /// Final canvas dimensions (may be extended for alignment).
     pub canvas: (u32, u32),
     /// Placement offset on canvas.
     pub placement: (u32, u32),
@@ -140,6 +143,25 @@ pub struct LayoutPlan {
     pub canvas_color: CanvasColor,
     /// True when no resize is needed (enables lossless path).
     pub resize_is_identity: bool,
+    /// If [`Align::Extend`] was used, crop to these dimensions after encoding.
+    /// Renderer should replicate edge pixels into the extension area.
+    pub encode_crop: Option<(u32, u32)>,
+}
+
+/// How to align canvas dimensions to codec-required multiples.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Align {
+    /// Round canvas down to nearest multiple. May lose up to `(n-1)` pixels per axis.
+    /// Use for video codecs (mod-2) where pixel-exact dimensions aren't critical.
+    RoundDown(u32),
+    /// Extend canvas up to nearest multiple. Image placed at `(0, 0)`, renderer
+    /// replicates edge pixels into the extension area. Original content dimensions
+    /// stored in [`IdealLayout::encode_crop`] / [`LayoutPlan::encode_crop`] for
+    /// post-encode cropping. No content loss.
+    ///
+    /// This is how JPEG MCU padding works — encode at extended size, store real
+    /// dimensions in the header, decoders crop automatically.
+    Extend(u32),
 }
 
 /// Post-computation safety limits applied after all layout computation.
@@ -147,7 +169,7 @@ pub struct LayoutPlan {
 /// All limits target the **canvas** (the encoded output dimensions):
 /// - `max`: prevents absurdly large outputs (security). Proportional downscale.
 /// - `min`: prevents degenerate tiny outputs. Proportional upscale.
-/// - `align`: snaps canvas to codec-required multiples (JPEG MCU, video mod-2).
+/// - `align`: snaps canvas to codec-required multiples.
 ///
 /// If `max` and `min` conflict, `max` wins (security trumps aesthetics).
 ///
@@ -159,16 +181,21 @@ pub struct MandatoryConstraints {
     pub max: Option<(u32, u32)>,
     /// Minimum canvas dimensions. If below, everything scales up proportionally.
     pub min: Option<(u32, u32)>,
-    /// Snap canvas to multiples of this value (rounds down, minimum 1×align).
-    pub align: Option<u32>,
+    /// Snap canvas to multiples. See [`Align`] for round-down vs extend modes.
+    pub align: Option<Align>,
 }
 
 impl MandatoryConstraints {
-    /// Apply limits to a computed layout, returning a modified layout.
+    /// Apply limits to a computed layout.
+    ///
+    /// Returns the modified layout and an optional encode_crop. If [`Align::Extend`]
+    /// was used, `encode_crop` contains the original content dimensions — the
+    /// renderer should replicate edge pixels into the extension area, and the
+    /// encoder should record these as the real image dimensions.
     ///
     /// Order: max (cap canvas) → min (floor canvas) → align (snap canvas).
     /// Max wins if min conflicts.
-    pub fn apply(&self, layout: Layout) -> Layout {
+    pub fn apply(&self, layout: Layout) -> (Layout, Option<(u32, u32)>) {
         let mut layout = layout;
 
         // 1. Max: if canvas exceeds max, scale everything down proportionally.
@@ -210,11 +237,11 @@ impl MandatoryConstraints {
             }
         }
 
-        // 3. Align: snap canvas down to multiples.
-        if let Some(align) = self.align {
-            if align > 1 {
-                let cw = (layout.canvas.0 / align).max(1) * align;
-                let ch = (layout.canvas.1 / align).max(1) * align;
+        // 3. Align canvas to multiples.
+        let encode_crop = match self.align {
+            Some(Align::RoundDown(n)) if n > 1 => {
+                let cw = (layout.canvas.0 / n).max(1) * n;
+                let ch = (layout.canvas.1 / n).max(1) * n;
                 layout.canvas = (cw, ch);
 
                 // resize_to can't exceed canvas.
@@ -228,10 +255,26 @@ impl MandatoryConstraints {
                     layout.placement.0.min(cw.saturating_sub(layout.resize_to.0)),
                     layout.placement.1.min(ch.saturating_sub(layout.resize_to.1)),
                 );
+                None
             }
-        }
+            Some(Align::Extend(n)) if n > 1 => {
+                let (ow, oh) = layout.canvas;
+                let cw = ow.div_ceil(n) * n;
+                let ch = oh.div_ceil(n) * n;
 
-        layout
+                if cw != ow || ch != oh {
+                    // Image at (0,0), extend right/bottom with edge replication.
+                    layout.placement = (0, 0);
+                    layout.canvas = (cw, ch);
+                    Some((ow, oh))
+                } else {
+                    None // already aligned
+                }
+            }
+            _ => None,
+        };
+
+        (layout, encode_crop)
     }
 
     /// Scale all layout dimensions by a factor.
@@ -581,6 +624,7 @@ impl IdealLayout {
             layout: sec_layout,
             source_crop: secondary_crop,
             padding: None, // secondary planes don't get padded
+            encode_crop: None,
         };
 
         let sec_request = DecoderRequest {
@@ -746,10 +790,10 @@ fn plan_from_parts(
     };
 
     // 4. Apply mandatory constraints (max/min/align).
-    let layout = if let Some(mc) = limits {
+    let (layout, encode_crop) = if let Some(mc) = limits {
         mc.apply(layout)
     } else {
-        layout
+        (layout, None)
     };
 
     // 5. Transform source crop back to pre-orientation source coordinates.
@@ -762,6 +806,7 @@ fn plan_from_parts(
         layout: layout.clone(),
         source_crop: source_crop_in_source,
         padding,
+        encode_crop,
     };
 
     let request = DecoderRequest {
@@ -813,6 +858,7 @@ pub fn finalize(ideal: &IdealLayout, request: &DecoderRequest, offer: &DecoderOf
         placement: ideal.layout.placement,
         canvas_color: ideal.layout.canvas_color,
         resize_is_identity,
+        encode_crop: ideal.encode_crop,
     }
 }
 
@@ -2743,7 +2789,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(1000, 667)
             .fit(1000, 667)
             .limits(MandatoryConstraints {
-                align: Some(16),
+                align: Some(Align::RoundDown(16)),
                 ..Default::default()
             })
             .plan()
@@ -2759,7 +2805,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(801, 601)
             .fit(801, 601)
             .limits(MandatoryConstraints {
-                align: Some(2),
+                align: Some(Align::RoundDown(2)),
                 ..Default::default()
             })
             .plan()
@@ -2774,7 +2820,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(800, 600)
             .fit_pad(400, 400)
             .limits(MandatoryConstraints {
-                align: Some(16),
+                align: Some(Align::RoundDown(16)),
                 ..Default::default()
             })
             .plan()
@@ -2792,7 +2838,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(800, 600)
             .fit_pad(401, 401)
             .limits(MandatoryConstraints {
-                align: Some(16),
+                align: Some(Align::RoundDown(16)),
                 ..Default::default()
             })
             .plan()
@@ -2809,7 +2855,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(801, 601)
             .fit(801, 601)
             .limits(MandatoryConstraints {
-                align: Some(1),
+                align: Some(Align::RoundDown(1)),
                 ..Default::default()
             })
             .plan()
@@ -2826,7 +2872,7 @@ mod tests {
             .limits(MandatoryConstraints {
                 max: Some((1920, 1080)),
                 min: Some((100, 100)),
-                align: Some(8),
+                align: Some(Align::RoundDown(8)),
             })
             .plan()
             .unwrap();
@@ -2875,7 +2921,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(3, 3)
             .fit(3, 3)
             .limits(MandatoryConstraints {
-                align: Some(16),
+                align: Some(Align::RoundDown(16)),
                 ..Default::default()
             })
             .plan()
@@ -2931,5 +2977,143 @@ mod tests {
             .plan()
             .unwrap();
         assert!(matches!(ideal.layout.canvas_color, CanvasColor::Linear { .. }));
+    }
+
+    // ── Align::Extend ───────────────────────────────────────────────────
+
+    #[test]
+    fn align_extend_rounds_up() {
+        // 801×601, align extend 16 → canvas 816×608, encode_crop = (801, 601)
+        let (ideal, _) = Pipeline::new(801, 601)
+            .fit(801, 601)
+            .limits(MandatoryConstraints {
+                align: Some(Align::Extend(16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, (816, 608));
+        assert_eq!(ideal.encode_crop, Some((801, 601)));
+        assert_eq!(ideal.layout.placement, (0, 0));
+        assert_eq!(ideal.layout.resize_to, (801, 601));
+    }
+
+    #[test]
+    fn align_extend_already_aligned_noop() {
+        // 800×640, already mod-16 → no extension
+        let (ideal, _) = Pipeline::new(800, 640)
+            .fit(800, 640)
+            .limits(MandatoryConstraints {
+                align: Some(Align::Extend(16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, (800, 640));
+        assert_eq!(ideal.encode_crop, None);
+    }
+
+    #[test]
+    fn align_extend_mod2() {
+        // 801×601, mod-2 → 802×602
+        let (ideal, _) = Pipeline::new(801, 601)
+            .fit(801, 601)
+            .limits(MandatoryConstraints {
+                align: Some(Align::Extend(2)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, (802, 602));
+        assert_eq!(ideal.encode_crop, Some((801, 601)));
+    }
+
+    #[test]
+    fn align_extend_mcu_8() {
+        // 100×100, MCU-8 → 104×104
+        let (ideal, _) = Pipeline::new(100, 100)
+            .fit(100, 100)
+            .limits(MandatoryConstraints {
+                align: Some(Align::Extend(8)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, (104, 104));
+        assert_eq!(ideal.encode_crop, Some((100, 100)));
+        assert_eq!(ideal.layout.resize_to, (100, 100));
+    }
+
+    #[test]
+    fn align_extend_with_pad() {
+        // FitPad(400, 400) on 800×600 → canvas=400×400 (already mod-16)
+        let (ideal, _) = Pipeline::new(800, 600)
+            .fit_pad(400, 400)
+            .limits(MandatoryConstraints {
+                align: Some(Align::Extend(16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        // 400 is mod-16, so no extension
+        assert_eq!(ideal.layout.canvas, (400, 400));
+        assert_eq!(ideal.encode_crop, None);
+    }
+
+    #[test]
+    fn align_extend_with_unaligned_pad() {
+        // FitPad(401, 401) → canvas=401×401, extend to 416×416
+        let (ideal, _) = Pipeline::new(800, 600)
+            .fit_pad(401, 401)
+            .limits(MandatoryConstraints {
+                align: Some(Align::Extend(16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, (416, 416));
+        assert_eq!(ideal.encode_crop, Some((401, 401)));
+        assert_eq!(ideal.layout.placement, (0, 0)); // moved to origin
+    }
+
+    #[test]
+    fn align_extend_finalize_carries_through() {
+        // encode_crop passes through finalize
+        let (ideal, req) = Pipeline::new(801, 601)
+            .fit(801, 601)
+            .limits(MandatoryConstraints {
+                align: Some(Align::Extend(16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        let offer = DecoderOffer::full_decode(801, 601);
+        let lp = ideal.finalize(&req, &offer);
+        assert_eq!(lp.canvas, (816, 608));
+        assert_eq!(lp.encode_crop, Some((801, 601)));
+    }
+
+    #[test]
+    fn align_extend_max_then_extend() {
+        // 4000×3000 fit to 4000×3000, max 1920×1080 → 1440×1080
+        // Then extend mod-16: 1440 is mod-16, 1080 is not → 1440×1088
+        let (ideal, _) = Pipeline::new(4000, 3000)
+            .fit(4000, 3000)
+            .limits(MandatoryConstraints {
+                max: Some((1920, 1080)),
+                align: Some(Align::Extend(16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert!(ideal.layout.canvas.0 % 16 == 0);
+        assert!(ideal.layout.canvas.1 % 16 == 0);
+        // Max applied first, then extend only adds a few pixels
+        assert!(ideal.layout.canvas.0 <= 1920 + 15);
+        assert!(ideal.layout.canvas.1 <= 1080 + 15);
+        if let Some((cw, ch)) = ideal.encode_crop {
+            assert!(cw <= 1920);
+            assert!(ch <= 1080);
+        }
     }
 }
