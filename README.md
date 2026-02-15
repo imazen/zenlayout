@@ -523,15 +523,15 @@ Derives: `Clone`, `Debug`
 
 Individual processing command for programmatic construction (alternative to `Pipeline`).
 
-| Variant | Fields | Description |
-|---------|--------|-------------|
-| `AutoOrient(u8)` | EXIF value (1-8) | Apply EXIF orientation. Composes into source transform. |
-| `Rotate(Rotation)` | | Manual rotation. Composes into source transform. |
-| `Flip(FlipAxis)` | | Manual flip. Composes into source transform. |
-| `Crop(SourceCrop)` | | Crop in post-orientation coordinates |
-| `Region(Region)` | | Viewport region in post-orientation coordinates |
-| `Constrain` | `{ constraint: Constraint }` | Constrain dimensions |
-| `Pad` | `{ top, right, bottom, left: u32, color: CanvasColor }` | Add padding |
+| Variant | Description |
+|---------|-------------|
+| `AutoOrient(u8)` | Apply EXIF orientation (1-8). Composes into source transform. |
+| `Rotate(Rotation)` | Manual rotation. Composes into source transform. |
+| `Flip(FlipAxis)` | Manual flip. Composes into source transform. |
+| `Crop(SourceCrop)` | Crop in post-orientation coordinates |
+| `Region(Region)` | Viewport region in post-orientation coordinates |
+| `Constrain(Constraint)` | Constrain dimensions |
+| `Pad(Padding)` | Add padding |
 
 In `compute_layout` (fixed mode): first `Crop`/`Region`, first `Constrain`, and first `Pad` win. In `compute_layout_sequential` (sequential mode): commands compose in order, last constraint wins.
 

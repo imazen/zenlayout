@@ -224,23 +224,9 @@ pub enum Command {
     /// Viewport region in post-orientation coordinates. Unifies crop and pad.
     Region(Region),
     /// Constrain dimensions in post-orientation coordinates.
-    Constrain {
-        /// The constraint to apply.
-        constraint: Constraint,
-    },
+    Constrain(Constraint),
     /// Add padding around the image.
-    Pad {
-        /// Top padding in pixels.
-        top: u32,
-        /// Right padding in pixels.
-        right: u32,
-        /// Bottom padding in pixels.
-        bottom: u32,
-        /// Left padding in pixels.
-        left: u32,
-        /// Padding color.
-        color: CanvasColor,
-    },
+    Pad(Padding),
 }
 
 /// Result of the first phase of layout planning.
@@ -1212,7 +1198,8 @@ fn scale_rect_outward(rect: Rect, scale_x: f64, scale_y: f64, max_w: u32, max_h:
 /// (what the user sees after rotation). The resulting source crop is transformed
 /// back to pre-orientation source coordinates for the decoder.
 ///
-/// Only the first `Crop` and first `Constrain` command are used; duplicates are ignored.
+/// First-wins: only the first `Crop`/`Region`, `Constrain`, and `Pad` are used;
+/// later duplicates are ignored.
 ///
 /// For a friendlier API, see [`Pipeline`].
 pub fn compute_layout(
@@ -1259,26 +1246,14 @@ pub fn compute_layout(
                     region = Some(*r);
                 }
             }
-            Command::Constrain { constraint: c } => {
+            Command::Constrain(c) => {
                 if constraint.is_none() {
                     constraint = Some(c);
                 }
             }
-            Command::Pad {
-                top,
-                right,
-                bottom,
-                left,
-                color,
-            } => {
+            Command::Pad(p) => {
                 if padding.is_none() {
-                    padding = Some(Padding {
-                        top: *top,
-                        right: *right,
-                        bottom: *bottom,
-                        left: *left,
-                        color: *color,
-                    });
+                    padding = Some(*p);
                 }
             }
         }
@@ -1370,7 +1345,7 @@ pub fn compute_layout_sequential(
                     pre_regions.push(*r);
                 }
             }
-            Command::Constrain { constraint: c } => {
+            Command::Constrain(c) => {
                 // Absorb any accumulated post_orientation into pre_orientation
                 // since a new constrain resets the post-constrain context.
                 orientation = orientation.compose(post_orientation);
@@ -1379,22 +1354,16 @@ pub fn compute_layout_sequential(
                 saw_constrain = true;
                 post_ops.clear(); // reset post-ops on each new constrain
             }
-            Command::Pad {
-                top,
-                right,
-                bottom,
-                left,
-                color,
-            } => {
+            Command::Pad(p) => {
                 if saw_constrain || !pre_regions.is_empty() {
                     post_ops.push(cmd);
                 } else {
                     pre_regions.push(Region {
-                        left: RegionCoord::px(-(*left as i32)),
-                        top: RegionCoord::px(-(*top as i32)),
-                        right: RegionCoord::pct_px(1.0, *right as i32),
-                        bottom: RegionCoord::pct_px(1.0, *bottom as i32),
-                        color: *color,
+                        left: RegionCoord::px(-(p.left as i32)),
+                        top: RegionCoord::px(-(p.top as i32)),
+                        right: RegionCoord::pct_px(1.0, p.right as i32),
+                        bottom: RegionCoord::pct_px(1.0, p.bottom as i32),
+                        color: p.color,
                     });
                 }
             }
@@ -1484,20 +1453,14 @@ pub fn compute_layout_sequential(
                     layout.canvas_color = r.color;
                 }
             }
-            Command::Pad {
-                top,
-                right,
-                bottom,
-                left,
-                color,
-            } => {
+            Command::Pad(p) => {
                 layout.canvas = Size::new(
-                    layout.canvas.width + left + right,
-                    layout.canvas.height + top + bottom,
+                    layout.canvas.width + p.left + p.right,
+                    layout.canvas.height + p.top + p.bottom,
                 );
-                layout.placement.0 += *left as i32;
-                layout.placement.1 += *top as i32;
-                layout.canvas_color = *color;
+                layout.placement.0 += p.left as i32;
+                layout.placement.1 += p.top as i32;
+                layout.canvas_color = p.color;
                 pad_applied = true;
             }
             _ => {} // orient commands already handled
@@ -1511,19 +1474,7 @@ pub fn compute_layout_sequential(
             .iter()
             .rev()
             .find_map(|op| match op {
-                Command::Pad {
-                    top,
-                    right,
-                    bottom,
-                    left,
-                    color,
-                } => Some(Padding {
-                    top: *top,
-                    right: *right,
-                    bottom: *bottom,
-                    left: *left,
-                    color: *color,
-                }),
+                Command::Pad(p) => Some(*p),
                 _ => None,
             })
     } else {
@@ -1994,9 +1945,7 @@ mod tests {
         // 800×600 rotated 90° → 600×800 oriented, then fit to 300×300
         let commands = [
             Command::AutoOrient(6),
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 300, 300),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 300, 300)),
         ];
         let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
         // Fit 600×800 into 300×300 → 225×300
@@ -2009,9 +1958,7 @@ mod tests {
         // Crop to 400×400, then fit to 200×200
         let commands = [
             Command::Crop(SourceCrop::pixels(100, 50, 400, 400)),
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 200, 200),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 200, 200)),
         ];
         let (ideal, _) = compute_layout(&commands, 800, 600, None).unwrap();
         assert_eq!(ideal.layout.resize_to, Size::new(200, 200));
@@ -2023,13 +1970,7 @@ mod tests {
 
     #[test]
     fn pad_expands_canvas() {
-        let commands = [Command::Pad {
-            top: 10,
-            right: 20,
-            bottom: 10,
-            left: 20,
-            color: CanvasColor::white(),
-        }];
+        let commands = [Command::Pad(Padding::new(10, 20, 10, 20, CanvasColor::white()))];
         let (ideal, _) = compute_layout(&commands, 400, 300, None).unwrap();
         assert_eq!(ideal.layout.resize_to, Size::new(400, 300));
         assert_eq!(ideal.layout.canvas, Size::new(440, 320));
@@ -2043,16 +1984,8 @@ mod tests {
     #[test]
     fn pad_after_constrain() {
         let commands = [
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 200, 200),
-            },
-            Command::Pad {
-                top: 5,
-                right: 5,
-                bottom: 5,
-                left: 5,
-                color: CanvasColor::black(),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 200, 200)),
+            Command::Pad(Padding::uniform(5, CanvasColor::black())),
         ];
         let (ideal, _) = compute_layout(&commands, 800, 400, None).unwrap();
         assert_eq!(ideal.layout.resize_to, Size::new(200, 100));
@@ -2064,9 +1997,7 @@ mod tests {
 
     #[test]
     fn finalize_full_decode_no_orientation() {
-        let commands = [Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 400, 300),
-        }];
+        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 400, 300))];
         let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
         let offer = DecoderOffer::full_decode(800, 600);
         let plan = finalize(&ideal, &req, &offer);
@@ -2082,9 +2013,7 @@ mod tests {
     fn finalize_full_decode_with_orientation() {
         let commands = [
             Command::AutoOrient(6),
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 300, 300),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 300, 300)),
         ];
         let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
         let offer = DecoderOffer::full_decode(800, 600);
@@ -2098,9 +2027,7 @@ mod tests {
     fn finalize_decoder_handles_orientation() {
         let commands = [
             Command::AutoOrient(6),
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 300, 300),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 300, 300)),
         ];
         let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
         // Decoder applied the rotation itself
@@ -2181,9 +2108,7 @@ mod tests {
 
     #[test]
     fn resize_not_identity_when_scaling() {
-        let commands = [Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 400, 300),
-        }];
+        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 400, 300))];
         let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
         let offer = DecoderOffer::full_decode(800, 600);
         let plan = finalize(&ideal, &req, &offer);
@@ -2220,12 +2145,8 @@ mod tests {
     #[test]
     fn duplicate_commands_use_first() {
         let commands = [
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 200, 200),
-            },
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 100, 100),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 200, 200)),
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 100, 100)),
         ];
         let (ideal, _) = compute_layout(&commands, 800, 600, None).unwrap();
         // First constraint wins: Fit to 200×200
@@ -2253,9 +2174,7 @@ mod tests {
     #[test]
     fn decoder_prescale_half() {
         // Request: fit 4000×3000 to 500×500, decoder prescales to 2000×1500
-        let commands = [Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 500, 500),
-        }];
+        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 500, 500))];
         let (ideal, req) = compute_layout(&commands, 4000, 3000, None).unwrap();
         assert_eq!(ideal.layout.resize_to, Size::new(500, 375));
 
@@ -2275,9 +2194,7 @@ mod tests {
     #[test]
     fn decoder_prescale_to_exact_target() {
         // JPEG decoder prescales to exactly the target size — no resize needed
-        let commands = [Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 500, 375),
-        }];
+        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 500, 375))];
         let (ideal, req) = compute_layout(&commands, 4000, 3000, None).unwrap();
         let offer = DecoderOffer {
             dimensions: Size::new(500, 375),
@@ -2291,9 +2208,7 @@ mod tests {
     #[test]
     fn decoder_prescale_eighth() {
         // 1/8 prescale: 4000×3000 → 500×375, matches target exactly
-        let commands = [Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 500, 500),
-        }];
+        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 500, 500))];
         let (_, req) = compute_layout(&commands, 4000, 3000, None).unwrap();
         // Decoder only managed 1/8 but dimensions don't match target
         let offer = DecoderOffer {
@@ -2302,9 +2217,7 @@ mod tests {
             orientation_applied: Orientation::Identity,
         };
         let (_, lp) = plan_finalize(
-            &[Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 500, 500),
-            }],
+            &[Command::Constrain(Constraint::new(ConstraintMode::Fit, 500, 500))],
             4000,
             3000,
             &offer,
@@ -2530,16 +2443,8 @@ mod tests {
         let commands = [
             Command::AutoOrient(5),
             Command::Crop(SourceCrop::pixels(10, 10, 200, 300)),
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 100, 100),
-            },
-            Command::Pad {
-                top: 5,
-                right: 5,
-                bottom: 5,
-                left: 5,
-                color: CanvasColor::black(),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 100, 100)),
+            Command::Pad(Padding::uniform(5, CanvasColor::black())),
         ];
         let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
         let offer = DecoderOffer::full_decode(800, 600);
@@ -2563,9 +2468,7 @@ mod tests {
             let orientation = Orientation::from_exif(exif).unwrap();
             let commands = [
                 Command::AutoOrient(exif),
-                Command::Constrain {
-                    constraint: Constraint::new(ConstraintMode::Fit, 300, 300),
-                },
+                Command::Constrain(Constraint::new(ConstraintMode::Fit, 300, 300)),
             ];
             let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
 
@@ -2637,9 +2540,7 @@ mod tests {
     #[test]
     fn one_pixel_image_with_fit() {
         // Fit upscales: 1×1 → 100×100
-        let commands = [Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 100, 100),
-        }];
+        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 100, 100))];
         let (_, lp) = plan_finalize(&commands, 1, 1, &DecoderOffer::full_decode(1, 1));
         assert_eq!(lp.resize_to, Size::new(100, 100));
         assert!(!lp.resize_is_identity);
@@ -2648,9 +2549,7 @@ mod tests {
     #[test]
     fn one_pixel_image_with_within() {
         // Within never upscales: 1×1 stays 1×1
-        let commands = [Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Within, 100, 100),
-        }];
+        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Within, 100, 100))];
         let (_, lp) = plan_finalize(&commands, 1, 1, &DecoderOffer::full_decode(1, 1));
         assert_eq!(lp.resize_to, Size::new(1, 1));
         assert!(lp.resize_is_identity);
@@ -2664,9 +2563,7 @@ mod tests {
         // Decoder prescales 1/4 AND handles rotation → delivers 750×1000
         let commands = [
             Command::AutoOrient(6),
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 500, 500),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 500, 500)),
         ];
         let (ideal, req) = compute_layout(&commands, 4000, 3000, None).unwrap();
         // Oriented: 3000×4000, fit to 500×500 → 375×500
@@ -2690,9 +2587,7 @@ mod tests {
         // Decoder prescales 1/4 but doesn't rotate → delivers 1000×750
         let commands = [
             Command::AutoOrient(6),
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 500, 500),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 500, 500)),
         ];
         let (ideal, req) = compute_layout(&commands, 4000, 3000, None).unwrap();
 
@@ -2716,9 +2611,7 @@ mod tests {
         // Request crop 200×200, decoder crops to 208×208 (MCU) then prescales 1/2 → 104×104
         let commands = [
             Command::Crop(SourceCrop::pixels(100, 100, 200, 200)),
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 100, 100),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 100, 100)),
         ];
         let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
         assert_eq!(ideal.layout.resize_to, Size::new(100, 100));
@@ -2745,10 +2638,10 @@ mod tests {
 
     #[test]
     fn finalize_preserves_canvas_from_fit_pad() {
-        let commands = [Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::FitPad, 400, 400)
-                .canvas_color(CanvasColor::white()),
-        }];
+        let commands = [Command::Constrain(
+                Constraint::new(ConstraintMode::FitPad, 400, 400)
+                    .canvas_color(CanvasColor::white()),
+            )];
         let (ideal, req) = compute_layout(&commands, 1000, 500, None).unwrap();
         assert_eq!(ideal.layout.canvas, Size::new(400, 400));
         assert_eq!(ideal.layout.resize_to, Size::new(400, 200));
@@ -2764,9 +2657,7 @@ mod tests {
 
     #[test]
     fn finalize_preserves_canvas_from_fit_crop() {
-        let commands = [Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::FitCrop, 400, 400),
-        }];
+        let commands = [Command::Constrain(Constraint::new(ConstraintMode::FitCrop, 400, 400))];
         let (ideal, req) = compute_layout(&commands, 1000, 500, None).unwrap();
         assert_eq!(ideal.layout.canvas, Size::new(400, 400));
         assert_eq!(ideal.layout.resize_to, Size::new(400, 400));
@@ -2783,9 +2674,7 @@ mod tests {
     #[test]
     fn decoder_crops_unrequested() {
         // No crop in commands, but decoder crops anyway (weird but possible)
-        let commands = [Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 400, 300),
-        }];
+        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 400, 300))];
         let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
         assert!(req.crop.is_none());
 
@@ -2853,9 +2742,7 @@ mod tests {
         // 100×1000 (very tall), rotate 90° → 1000×100, fit to 500×500
         let commands = [
             Command::AutoOrient(6),
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 500, 500),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 500, 500)),
         ];
         let (ideal, req) = compute_layout(&commands, 100, 1000, None).unwrap();
         // oriented: 1000×100, fit to 500×500 → 500×50
@@ -2893,9 +2780,7 @@ mod tests {
         let commands = [
             Command::AutoOrient(8),
             Command::Crop(SourceCrop::pixels(50, 50, 400, 600)),
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 200, 200),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 200, 200)),
         ];
         let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
 
@@ -2919,9 +2804,7 @@ mod tests {
         let commands = [
             Command::AutoOrient(8),
             Command::Crop(SourceCrop::pixels(50, 50, 400, 600)),
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 200, 200),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 200, 200)),
         ];
         let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
         let offer = DecoderOffer::full_decode(800, 600);
@@ -2938,9 +2821,7 @@ mod tests {
         let commands = [
             Command::AutoOrient(8),
             Command::Crop(SourceCrop::pixels(50, 50, 400, 600)),
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 200, 200),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 200, 200)),
         ];
         let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
         let target = ideal.layout.resize_to;
@@ -2961,9 +2842,7 @@ mod tests {
 
     #[test]
     fn extreme_aspect_ratio_1x10000() {
-        let commands = [Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 100, 100),
-        }];
+        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 100, 100))];
         let (ideal, req) = compute_layout(&commands, 1, 10000, None).unwrap();
         // Fit 1×10000 into 100×100 → 1×100
         assert_eq!(ideal.layout.resize_to, Size::new(1, 100));
@@ -2976,9 +2855,7 @@ mod tests {
 
     #[test]
     fn extreme_aspect_ratio_10000x1() {
-        let commands = [Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 100, 100),
-        }];
+        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 100, 100))];
         let (ideal, _) = compute_layout(&commands, 10000, 1, None).unwrap();
         assert_eq!(ideal.layout.resize_to, Size::new(100, 1));
     }
@@ -3022,10 +2899,10 @@ mod tests {
 
     #[test]
     fn fit_pad_with_prescaled_decoder() {
-        let commands = [Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::FitPad, 400, 400)
-                .canvas_color(CanvasColor::white()),
-        }];
+        let commands = [Command::Constrain(
+                Constraint::new(ConstraintMode::FitPad, 400, 400)
+                    .canvas_color(CanvasColor::white()),
+            )];
         let (ideal, req) = compute_layout(&commands, 4000, 2000, None).unwrap();
         // Fit 4000×2000 into 400×400 → 400×200, canvas 400×400, placement (0,100)
         assert_eq!(ideal.layout.resize_to, Size::new(400, 200));
@@ -3080,9 +2957,7 @@ mod tests {
         let commands = [
             Command::AutoOrient(6),
             Command::Crop(SourceCrop::pixels(50, 50, 400, 600)),
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 200, 200),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 200, 200)),
         ];
         let (ideal_cmd, req_cmd) = compute_layout(&commands, 800, 600, None).unwrap();
 
@@ -4997,9 +4872,7 @@ mod tests {
         let commands = [
             Command::AutoOrient(6),
             Command::Crop(SourceCrop::pixels(50, 50, 500, 700)),
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 300, 300),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 300, 300)),
         ];
         let sequential = compute_layout_sequential(&commands, 800, 600, None).unwrap();
 
@@ -5031,12 +4904,8 @@ mod tests {
     fn sequential_last_constrain_wins() {
         // In sequential mode, the last constraint wins
         let commands = [
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 100, 100),
-            },
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 500, 500),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 100, 100)),
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 500, 500)),
         ];
         let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
         // Last constraint (500×500) wins: fit 800×600 into 500×500 → 500×375
@@ -5047,16 +4916,8 @@ mod tests {
     fn sequential_post_constrain_pad() {
         // Pad after constrain expands the canvas
         let commands = [
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 400, 300),
-            },
-            Command::Pad {
-                top: 10,
-                right: 10,
-                bottom: 10,
-                left: 10,
-                color: CanvasColor::white(),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 400, 300)),
+            Command::Pad(Padding::uniform(10, CanvasColor::white())),
         ];
         let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
         assert_eq!(ideal.layout.resize_to, Size::new(400, 300));
@@ -5068,9 +4929,7 @@ mod tests {
     fn sequential_post_constrain_crop() {
         // Crop after constrain trims the canvas
         let commands = [
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 400, 300),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 400, 300)),
             Command::Crop(SourceCrop::pixels(50, 50, 300, 200)),
         ];
         let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
@@ -5083,16 +4942,8 @@ mod tests {
         // crop → constrain → pad → crop (post-constrain trim)
         let commands = [
             Command::Crop(SourceCrop::pixels(0, 0, 400, 300)),
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 200, 150),
-            },
-            Command::Pad {
-                top: 20,
-                right: 20,
-                bottom: 20,
-                left: 20,
-                color: CanvasColor::black(),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 200, 150)),
+            Command::Pad(Padding::uniform(20, CanvasColor::black())),
             Command::Crop(SourceCrop::pixels(10, 10, 220, 170)),
         ];
         let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
@@ -5104,9 +4955,7 @@ mod tests {
     #[test]
     fn sequential_with_limits() {
         let commands = [
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 2000, 2000),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 2000, 2000)),
         ];
         let limits = OutputLimits {
             max: Some(Size::new(500, 500)),
@@ -5130,9 +4979,7 @@ mod tests {
     fn sequential_via_free_function() {
         let commands = [
             Command::AutoOrient(6),
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 300, 300),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 300, 300)),
         ];
         let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
         assert_eq!(ideal.orientation, Orientation::Rotate90);
@@ -5144,9 +4991,7 @@ mod tests {
     fn sequential_post_constrain_region() {
         // Region after constrain redefines the canvas viewport
         let commands = [
-            Command::Constrain {
-                constraint: Constraint::new(ConstraintMode::Fit, 400, 300),
-            },
+            Command::Constrain(Constraint::new(ConstraintMode::Fit, 400, 300)),
             Command::Region(Region {
                 left: RegionCoord::px(-20),
                 top: RegionCoord::px(-20),

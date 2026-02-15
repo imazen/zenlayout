@@ -329,7 +329,7 @@ fn immediate_eval(source: &Grid, commands: &[Command]) -> Grid {
             Command::Region(reg) => {
                 current = current.apply_region(reg);
             }
-            Command::Constrain { constraint } => {
+            Command::Constrain(constraint) => {
                 let layout = constraint.clone().compute(current.width, current.height).unwrap();
                 // In immediate mode, the constraint's source is the current buffer.
                 // source_crop applies to current, then resize, then place on canvas.
@@ -347,14 +347,8 @@ fn immediate_eval(source: &Grid, commands: &[Command]) -> Grid {
                     layout.placement.1,
                 );
             }
-            Command::Pad {
-                top,
-                right,
-                bottom,
-                left,
-                ..
-            } => {
-                current = current.pad(*top, *right, *bottom, *left);
+            Command::Pad(p) => {
+                current = current.pad(p.top, p.right, p.bottom, p.left);
             }
         }
     }
@@ -494,9 +488,7 @@ fn crop_constrain() {
     let src = Grid::source(100, 100);
     let commands = [
         Command::Crop(SourceCrop::Pixels(Rect::new(10, 10, 80, 80))),
-        Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 40, 40),
-        },
+        Command::Constrain(Constraint::new(ConstraintMode::Fit, 40, 40)),
     ];
     compare("crop→constrain", &src, &commands);
 }
@@ -505,16 +497,8 @@ fn crop_constrain() {
 fn constrain_pad() {
     let src = Grid::source(100, 100);
     let commands = [
-        Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 50, 50),
-        },
-        Command::Pad {
-            top: 5,
-            right: 5,
-            bottom: 5,
-            left: 5,
-            color: CanvasColor::Transparent,
-        },
+        Command::Constrain(Constraint::new(ConstraintMode::Fit, 50, 50)),
+        Command::Pad(Padding::uniform(5, CanvasColor::Transparent)),
     ];
     compare("constrain→pad", &src, &commands);
 }
@@ -525,9 +509,7 @@ fn orient_crop_constrain() {
     let commands = [
         Command::Rotate(Rotation::Rotate90),
         Command::Crop(SourceCrop::Pixels(Rect::new(1, 1, 6, 10))),
-        Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 3, 5),
-        },
+        Command::Constrain(Constraint::new(ConstraintMode::Fit, 3, 5)),
     ];
     compare("orient→crop→constrain", &src, &commands);
 }
@@ -535,9 +517,7 @@ fn orient_crop_constrain() {
 #[test]
 fn constrain_only() {
     let src = Grid::source(100, 50);
-    let commands = [Command::Constrain {
-        constraint: Constraint::new(ConstraintMode::Fit, 50, 50),
-    }];
+    let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 50, 50))];
     compare("constrain_only", &src, &commands);
 }
 
@@ -576,9 +556,7 @@ fn constrain_then_crop_origin() {
     // Post-constrain crop at origin — should work since placement stays non-negative
     let src = Grid::source(100, 100);
     let commands = [
-        Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 50, 50),
-        },
+        Command::Constrain(Constraint::new(ConstraintMode::Fit, 50, 50)),
         Command::Crop(SourceCrop::Pixels(Rect::new(0, 0, 25, 25))),
     ];
     compare("constrain→crop(origin)", &src, &commands);
@@ -589,9 +567,7 @@ fn constrain_then_crop_center() {
     // Post-constrain crop NOT at origin — placement goes negative, u32 saturates
     let src = Grid::source(100, 100);
     let commands = [
-        Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 50, 50),
-        },
+        Command::Constrain(Constraint::new(ConstraintMode::Fit, 50, 50)),
         Command::Crop(SourceCrop::Pixels(Rect::new(10, 10, 30, 30))),
     ];
     let mismatch = compare_expect_mismatch("constrain→crop(center)", &src, &commands);
@@ -607,9 +583,7 @@ fn constrain_then_crop_center_pixel_detail() {
     // Post-constrain crop with nonzero origin: i32 placement handles negative offsets
     let src = Grid::source(10, 10);
     let commands = [
-        Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 10, 10), // identity resize
-        },
+        Command::Constrain(Constraint::new(ConstraintMode::Fit, 10, 10)), // identity resize
         Command::Crop(SourceCrop::Pixels(Rect::new(3, 3, 4, 4))),
     ];
     compare("constrain(identity)→crop(3,3,4,4)", &src, &commands);
@@ -624,9 +598,7 @@ fn pad_region_then_constrain() {
     let src = Grid::source(8, 8);
     let commands = [
         Command::Region(Region::padded(4, CanvasColor::Transparent)),
-        Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 8, 8),
-        },
+        Command::Constrain(Constraint::new(ConstraintMode::Fit, 8, 8)),
     ];
     compare("pad(4)→fit(8x8) on 8x8", &src, &commands);
 }
@@ -639,9 +611,7 @@ fn pad_region_then_constrain_downscale() {
     let src = Grid::source(16, 16);
     let commands = [
         Command::Region(Region::padded(4, CanvasColor::Transparent)),
-        Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 8, 8),
-        },
+        Command::Constrain(Constraint::new(ConstraintMode::Fit, 8, 8)),
     ];
 
     let immediate = immediate_eval(&src, &commands);
@@ -663,9 +633,7 @@ fn crop_constrain_crop() {
     let src = Grid::source(20, 20);
     let commands = [
         Command::Crop(SourceCrop::Pixels(Rect::new(2, 2, 16, 16))),
-        Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 16, 16),
-        },
+        Command::Constrain(Constraint::new(ConstraintMode::Fit, 16, 16)),
         Command::Crop(SourceCrop::Pixels(Rect::new(4, 4, 8, 8))),
     ];
     compare("crop→constrain→crop(center)", &src, &commands);
@@ -676,9 +644,7 @@ fn constrain_then_region_viewport() {
     // Post-constrain region: redefine canvas viewport of resized output
     let src = Grid::source(20, 20);
     let commands = [
-        Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 10, 10),
-        },
+        Command::Constrain(Constraint::new(ConstraintMode::Fit, 10, 10)),
         Command::Region(Region {
             left: RegionCoord::px(2),
             top: RegionCoord::px(2),
@@ -695,16 +661,8 @@ fn constrain_then_pad_then_crop() {
     // Constrain → pad → crop the padded result: i32 placement handles the offset
     let src = Grid::source(20, 20);
     let commands = [
-        Command::Constrain {
-            constraint: Constraint::new(ConstraintMode::Fit, 10, 10),
-        },
-        Command::Pad {
-            top: 5,
-            right: 5,
-            bottom: 5,
-            left: 5,
-            color: CanvasColor::Transparent,
-        },
+        Command::Constrain(Constraint::new(ConstraintMode::Fit, 10, 10)),
+        Command::Pad(Padding::uniform(5, CanvasColor::Transparent)),
         Command::Crop(SourceCrop::Pixels(Rect::new(2, 2, 16, 16))),
     ];
     compare("constrain→pad→crop", &src, &commands);
@@ -714,45 +672,31 @@ fn constrain_then_pad_then_crop() {
 
 // Helper to make constraint commands less verbose
 fn fit(w: u32, h: u32) -> Command {
-    Command::Constrain {
-        constraint: Constraint::new(ConstraintMode::Fit, w, h),
-    }
+    Command::Constrain(Constraint::new(ConstraintMode::Fit, w, h))
 }
 
 fn fit_crop(w: u32, h: u32) -> Command {
-    Command::Constrain {
-        constraint: Constraint::new(ConstraintMode::FitCrop, w, h),
-    }
+    Command::Constrain(Constraint::new(ConstraintMode::FitCrop, w, h))
 }
 
 fn fit_pad(w: u32, h: u32) -> Command {
-    Command::Constrain {
-        constraint: Constraint::new(ConstraintMode::FitPad, w, h),
-    }
+    Command::Constrain(Constraint::new(ConstraintMode::FitPad, w, h))
 }
 
 fn within(w: u32, h: u32) -> Command {
-    Command::Constrain {
-        constraint: Constraint::new(ConstraintMode::Within, w, h),
-    }
+    Command::Constrain(Constraint::new(ConstraintMode::Within, w, h))
 }
 
 fn distort(w: u32, h: u32) -> Command {
-    Command::Constrain {
-        constraint: Constraint::new(ConstraintMode::Distort, w, h),
-    }
+    Command::Constrain(Constraint::new(ConstraintMode::Distort, w, h))
 }
 
 fn width_only(w: u32) -> Command {
-    Command::Constrain {
-        constraint: Constraint::width_only(ConstraintMode::Fit, w),
-    }
+    Command::Constrain(Constraint::width_only(ConstraintMode::Fit, w))
 }
 
 fn height_only(h: u32) -> Command {
-    Command::Constrain {
-        constraint: Constraint::height_only(ConstraintMode::Fit, h),
-    }
+    Command::Constrain(Constraint::height_only(ConstraintMode::Fit, h))
 }
 
 fn crop(x: u32, y: u32, w: u32, h: u32) -> Command {
@@ -784,13 +728,7 @@ fn flip_v() -> Command {
 }
 
 fn pad(top: u32, right: u32, bottom: u32, left: u32) -> Command {
-    Command::Pad {
-        top,
-        right,
-        bottom,
-        left,
-        color: CanvasColor::Transparent,
-    }
+    Command::Pad(Padding::new(top, right, bottom, left, CanvasColor::Transparent))
 }
 
 fn exif(val: u8) -> Command {
