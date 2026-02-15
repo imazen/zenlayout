@@ -317,11 +317,11 @@ Where to position the image when cropping or padding.
 | `Center` | Center on both axes (default) |
 | `Percentage(f32, f32)` | Position by `(x, y)` percentage. `(0.0, 0.0)` = top-left, `(1.0, 1.0)` = bottom-right |
 
-Derives: `Copy`, `Clone`, `Debug`, `Default` (`Center`), `PartialEq`
+Derives: `Copy`, `Clone`, `Debug`, `Default` (`Center`), `PartialEq`. `#[non_exhaustive]`.
 
 ### `CanvasColor`
 
-Canvas background color for pad modes.
+Canvas background color for pad modes. `#[non_exhaustive]`.
 
 | Variant | Description |
 |---------|-------------|
@@ -470,7 +470,7 @@ Derives: `Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`
 
 ### `LayoutError`
 
-Layout computation error.
+Layout computation error. `#[non_exhaustive]`.
 
 | Variant | Display message |
 |---------|-----------------|
@@ -521,7 +521,7 @@ Derives: `Clone`, `Debug`
 
 ### `Command`
 
-Individual processing command for programmatic construction (alternative to `Pipeline`).
+Individual processing command for programmatic construction (alternative to `Pipeline`). `#[non_exhaustive]`.
 
 | Variant | Description |
 |---------|-------------|
