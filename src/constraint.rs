@@ -428,20 +428,59 @@ impl Constraint {
             }
 
             WithinCrop => {
-                let aspect_crop = crop_to_aspect(sw, sh, tw, th, &self.gravity);
-                let combined = combine_crops(user_crop, aspect_crop);
-                let (rw, rh) = if combined.width <= tw && combined.height <= th {
-                    (combined.width, combined.height)
+                // Matches imageflow's Crop+DownscaleOnly:
+                // Seq 1: skip_if(Either(Less)) → scale_to_outer, crop
+                // Seq 2: skip_unless(Larger1DSmaller1D) → crop_to_intersection
+                if sw <= tw && sh <= th {
+                    // Source fits within target — no action (identity).
+                    Layout {
+                        source: (source_w, source_h),
+                        source_crop: user_crop,
+                        resize_to: (sw, sh),
+                        canvas: (sw, sh),
+                        placement: (0, 0),
+                        canvas_color: self.canvas_color,
+                    }
+                } else if sw >= tw && sh >= th {
+                    // Source exceeds target on both dims — crop to aspect + downscale.
+                    let aspect_crop = crop_to_aspect(sw, sh, tw, th, &self.gravity);
+                    let combined = combine_crops(user_crop, aspect_crop);
+                    Layout {
+                        source: (source_w, source_h),
+                        source_crop: Some(combined),
+                        resize_to: (tw, th),
+                        canvas: (tw, th),
+                        placement: (0, 0),
+                        canvas_color: self.canvas_color,
+                    }
                 } else {
-                    (tw, th)
-                };
-                Layout {
-                    source: (source_w, source_h),
-                    source_crop: Some(combined),
-                    resize_to: (rw, rh),
-                    canvas: (rw, rh),
-                    placement: (0, 0),
-                    canvas_color: self.canvas_color,
+                    // Mixed: one dim larger, one smaller → crop to intersection.
+                    let rw = sw.min(tw);
+                    let rh = sh.min(th);
+                    let crop = if rw < sw || rh < sh {
+                        let x = if rw < sw {
+                            gravity_offset_1d(sw - rw, &self.gravity, true)
+                        } else {
+                            0
+                        };
+                        let y = if rh < sh {
+                            gravity_offset_1d(sh - rh, &self.gravity, false)
+                        } else {
+                            0
+                        };
+                        let r = Rect::new(x, y, rw, rh);
+                        Some(combine_crops(user_crop, r))
+                    } else {
+                        user_crop
+                    };
+                    Layout {
+                        source: (source_w, source_h),
+                        source_crop: crop,
+                        resize_to: (rw, rh),
+                        canvas: (rw, rh),
+                        placement: (0, 0),
+                        canvas_color: self.canvas_color,
+                    }
                 }
             }
 
@@ -459,19 +498,30 @@ impl Constraint {
             }
 
             WithinPad => {
-                let (rw, rh) = if sw <= tw && sh <= th {
-                    (sw, sh)
+                // Matches imageflow's Pad+DownscaleOnly:
+                // skip_unless(Either(Greater)) → scale_to_inner, pad
+                // When source fits within target on both dims, skip everything
+                // (no resize, no pad — identity).
+                if sw <= tw && sh <= th {
+                    Layout {
+                        source: (source_w, source_h),
+                        source_crop: user_crop,
+                        resize_to: (sw, sh),
+                        canvas: (sw, sh),
+                        placement: (0, 0),
+                        canvas_color: self.canvas_color,
+                    }
                 } else {
-                    fit_inside(sw, sh, tw, th)
-                };
-                let (px, py) = gravity_offset(tw, th, rw, rh, &self.gravity);
-                Layout {
-                    source: (source_w, source_h),
-                    source_crop: user_crop,
-                    resize_to: (rw, rh),
-                    canvas: (tw, th),
-                    placement: (px, py),
-                    canvas_color: self.canvas_color,
+                    let (rw, rh) = fit_inside(sw, sh, tw, th);
+                    let (px, py) = gravity_offset(tw, th, rw, rh, &self.gravity);
+                    Layout {
+                        source: (source_w, source_h),
+                        source_crop: user_crop,
+                        resize_to: (rw, rh),
+                        canvas: (tw, th),
+                        placement: (px, py),
+                        canvas_color: self.canvas_color,
+                    }
                 }
             }
 
@@ -594,13 +644,11 @@ fn fit_inside(sw: u32, sh: u32, tw: u32, th: u32) -> (u32, u32) {
     let ratio_h = th as f64 / sh as f64;
     if ratio_w <= ratio_h {
         // Width constrains — compute height.
-        // Snap to target height if rounding would land within 1 pixel,
-        // preventing cascading rounding errors (e.g., 1200×400 → 100×33).
-        let h = round_snap(sh as f64 * ratio_w, th);
+        let h = proportional(sw, sh, tw, true, tw, th);
         (tw, h)
     } else {
         // Height constrains — compute width.
-        let w = round_snap(sw as f64 * ratio_h, tw);
+        let w = proportional(sw, sh, th, false, tw, th);
         (w, th)
     }
 }
@@ -623,8 +671,10 @@ fn crop_to_aspect(sw: u32, sh: u32, tw: u32, th: u32, gravity: &Gravity) -> Rect
     let source_ratio = sw as f64 / sh as f64;
 
     if source_ratio > target_ratio {
-        // Source is wider — crop width.
-        let new_w = round_snap(sh as f64 * target_ratio, tw);
+        // Source is wider — crop width, keep full height.
+        // We need the width that gives target aspect ratio at source height.
+        // Using target ratio tw/th: new_w = sh * tw / th
+        let new_w = proportional(tw, th, sh, false, sw, sh);
         if new_w >= sw {
             return Rect {
                 x: 0,
@@ -641,8 +691,9 @@ fn crop_to_aspect(sw: u32, sh: u32, tw: u32, th: u32, gravity: &Gravity) -> Rect
             height: sh,
         }
     } else {
-        // Source is taller — crop height.
-        let new_h = round_snap(sw as f64 / target_ratio, th);
+        // Source is taller — crop height, keep full width.
+        // new_h = sw * th / tw
+        let new_h = proportional(tw, th, sw, true, sw, sh);
         if new_h >= sh {
             return Rect {
                 x: 0,
@@ -699,18 +750,79 @@ fn gravity_offset_1d(space: u32, gravity: &Gravity, horizontal: bool) -> u32 {
     }
 }
 
-/// Round a computed dimension, snapping to `snap_target` if within 1 pixel.
+/// Compute the free dimension proportionally, with snap-aware rounding.
 ///
-/// This prevents cascading rounding errors when computing one dimension
-/// from the other via aspect ratio. For example, source 1200×400 at
-/// target 100×33: `width_for(33) = 33 * 3.0 = 99`, but should be 100.
-/// Snapping to the target value (100) when within 1 pixel fixes this.
-fn round_snap(value: f64, snap_target: u32) -> u32 {
-    if (value - snap_target as f64).abs() <= 1.0 {
-        snap_target
+/// Ports imageflow_riapi's `AspectRatio::proportional()` rounding logic.
+/// Given a ratio source (`ratio_w`×`ratio_h`), a fixed dimension (`basis`,
+/// `basis_is_width`), and a snap target (`target_w`×`target_h`), compute
+/// the free dimension with rounding-loss-based snapping.
+///
+/// This prevents cascading rounding errors (e.g., 1200×400 → 100×33 producing
+/// 99 instead of 100) by snapping to whichever candidate (source or target
+/// dimension) has less rounding error.
+fn proportional(
+    ratio_w: u32,
+    ratio_h: u32,
+    basis: u32,
+    basis_is_width: bool,
+    target_w: u32,
+    target_h: u32,
+) -> u32 {
+    let ratio = ratio_w as f64 / ratio_h as f64;
+
+    // Compute rounding loss to determine snap tolerance.
+    let snap_amount = if basis_is_width {
+        rounding_loss_height(ratio_w, ratio_h, target_h)
     } else {
-        (value.round() as u32).max(1)
-    }
+        rounding_loss_width(ratio_w, ratio_h, target_w)
+    };
+
+    // snap_a = source dimension on the free axis
+    let snap_a = if basis_is_width { ratio_h } else { ratio_w };
+    // snap_b = target dimension on the free axis
+    let snap_b = if basis_is_width { target_h } else { target_w };
+
+    // Compute the proportional value
+    let float = if basis_is_width {
+        basis as f64 / ratio
+    } else {
+        ratio * basis as f64
+    };
+
+    let delta_a = (float - snap_a as f64).abs();
+    let delta_b = (float - snap_b as f64).abs();
+
+    let v = if delta_a <= snap_amount && delta_a <= delta_b {
+        snap_a
+    } else if delta_b <= snap_amount {
+        snap_b
+    } else {
+        float.round() as u32
+    };
+
+    if v == 0 { 1 } else { v }
+}
+
+/// Rounding loss when target width is used as basis.
+/// Matches imageflow's `rounding_loss_based_on_target_width`.
+fn rounding_loss_width(ratio_w: u32, ratio_h: u32, target_width: u32) -> f64 {
+    let ratio = ratio_w as f64 / ratio_h as f64;
+    let target_x_to_self_x = target_width as f64 / ratio_w as f64;
+    let recreate_y = ratio_h as f64 * target_x_to_self_x;
+    let rounded_y = recreate_y.round();
+    let recreate_x_from_rounded_y = rounded_y * ratio;
+    (target_width as f64 - recreate_x_from_rounded_y).abs()
+}
+
+/// Rounding loss when target height is used as basis.
+/// Matches imageflow's `rounding_loss_based_on_target_height`.
+fn rounding_loss_height(ratio_w: u32, ratio_h: u32, target_height: u32) -> f64 {
+    let ratio = ratio_w as f64 / ratio_h as f64;
+    let target_y_to_self_y = target_height as f64 / ratio_h as f64;
+    let recreate_x = ratio_w as f64 * target_y_to_self_y;
+    let rounded_x = recreate_x.round();
+    let recreate_y_from_rounded_x = rounded_x / ratio;
+    (target_height as f64 - recreate_y_from_rounded_x).abs()
 }
 
 #[cfg(test)]
@@ -888,13 +1000,10 @@ mod tests {
         let l = Constraint::new(ConstraintMode::WithinCrop, 400, 300)
             .compute(200, 100)
             .unwrap();
-        // Source fits, aspect crop applies (200×100 is 2:1, target is 4:3).
-        let crop = l.source_crop.unwrap();
-        // Cropped to 4:3: width = 100 * 4/3 = 133
-        assert_eq!(crop.height, 100);
-        assert!(crop.width < 200);
-        // No upscale → resize_to = crop dimensions.
-        assert_eq!(l.resize_to, (crop.width, crop.height));
+        // Source fits within target on both dims → identity (imageflow behavior).
+        assert_eq!(l.resize_to, (200, 100));
+        assert_eq!(l.canvas, (200, 100));
+        assert!(l.source_crop.is_none());
     }
 
     // ── ConstraintMode::FitPad ──────────────────────────────────────────
@@ -925,16 +1034,15 @@ mod tests {
 
     #[test]
     fn within_pad_canvas_expand() {
-        // Source smaller than target → no resize, just pad.
+        // Source smaller than target → identity, no padding (imageflow behavior).
         let l = Constraint::new(ConstraintMode::WithinPad, 400, 300)
             .canvas_color(CanvasColor::white())
             .compute(200, 100)
             .unwrap();
         assert_eq!(l.resize_to, (200, 100));
-        assert_eq!(l.canvas, (400, 300));
-        assert_eq!(l.placement, (100, 100)); // Centered
+        assert_eq!(l.canvas, (200, 100));
         assert!(!l.needs_resize());
-        assert!(l.needs_padding());
+        assert!(!l.needs_padding());
     }
 
     #[test]
@@ -1442,24 +1550,37 @@ mod tests {
                             }
                         }
                         WithinPad => {
-                            if (cw, ch) != (tw, th) {
-                                failures.push(format!(
-                                    "{tag}: canvas ({cw},{ch}) != target ({tw},{th})"
-                                ));
-                            }
                             if sw <= tw && sh <= th {
+                                // Source fits within target → identity (imageflow behavior)
                                 if (rw, rh) != (sw, sh) {
                                     failures.push(format!(
                                         "{tag}: no-upscale: ({rw},{rh}) != source ({sw},{sh})"
+                                    ));
+                                }
+                                if (cw, ch) != (sw, sh) {
+                                    failures.push(format!(
+                                        "{tag}: identity canvas ({cw},{ch}) != source ({sw},{sh})"
+                                    ));
+                                }
+                            } else {
+                                // Source exceeds target on at least one axis → downscale + pad
+                                if (cw, ch) != (tw, th) {
+                                    failures.push(format!(
+                                        "{tag}: canvas ({cw},{ch}) != target ({tw},{th})"
+                                    ));
+                                }
+                                if rw > tw || rh > th {
+                                    failures.push(format!(
+                                        "{tag}: resize_to ({rw},{rh}) exceeds target ({tw},{th})"
                                     ));
                                 }
                             }
                             if layout.source_crop.is_some() {
                                 failures.push(format!("{tag}: unexpected source_crop"));
                             }
-                            if px + rw > tw || py + rh > th {
+                            if px + rw > cw || py + rh > ch {
                                 failures.push(format!(
-                                    "{tag}: placement overflow: ({px},{py})+({rw},{rh})>({tw},{th})"
+                                    "{tag}: placement overflow: ({px},{py})+({rw},{rh})>({cw},{ch})"
                                 ));
                             }
                         }
@@ -1744,14 +1865,22 @@ mod tests {
 
     #[test]
     fn gravity_center_odd_padding() {
-        // WithinPad: no upscale, so 100×100 stays at 100×100 in a 103×103 canvas
+        // WithinPad: source fits within target → identity (imageflow behavior).
         let l = Constraint::new(ConstraintMode::WithinPad, 103, 103)
             .compute(100, 100)
             .unwrap();
-        assert_eq!(l.canvas, (103, 103));
+        assert_eq!(l.canvas, (100, 100));
         assert_eq!(l.resize_to, (100, 100));
-        // Center: 3/2 = 1 (integer division)
-        assert_eq!(l.placement, (1, 1));
+        assert_eq!(l.placement, (0, 0));
+
+        // FitPad DOES pad when aspect differs and source < target:
+        let l = Constraint::new(ConstraintMode::FitPad, 103, 200)
+            .compute(100, 100)
+            .unwrap();
+        assert_eq!(l.canvas, (103, 200));
+        assert_eq!(l.resize_to, (103, 103));
+        // Center vertically: (200-103)/2 = 48
+        assert_eq!(l.placement, (0, 48));
     }
 
     #[test]
@@ -1785,5 +1914,583 @@ mod tests {
             .compute(1000, 500)
             .unwrap();
         assert_eq!(l_pct.placement, l_center.placement);
+    }
+
+    // ========================================================================
+    // imageflow_riapi parity oracle
+    //
+    // Ports the core of imageflow_riapi/src/sizing.rs as a test-only oracle.
+    // Verifies that zenlayout's constraint module produces identical results
+    // for all overlapping modes across thousands of source×target combinations.
+    // ========================================================================
+
+    #[allow(dead_code)]
+    mod oracle {
+        use core::cmp::Ordering;
+
+        /// Aspect ratio / size pair (mirrors imageflow's AspectRatio).
+        #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+        pub struct AR {
+            pub w: i32,
+            pub h: i32,
+        }
+
+        impl core::fmt::Debug for AR {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                write!(f, "{}x{}", self.w, self.h)
+            }
+        }
+
+        impl AR {
+            pub fn new(w: i32, h: i32) -> Self {
+                assert!(w >= 1 && h >= 1, "AR dimensions must be >= 1, got {w}x{h}");
+                AR { w, h }
+            }
+
+            pub fn ratio_f64(&self) -> f64 {
+                f64::from(self.w) / f64::from(self.h)
+            }
+
+            pub fn aspect_wider_than(&self, other: &AR) -> bool {
+                other.ratio_f64() > self.ratio_f64()
+            }
+
+            /// Rounding-snap proportional calculation (imageflow's core rounding logic).
+            pub fn proportional(
+                &self,
+                basis: i32,
+                basis_is_width: bool,
+                snap_target: Option<&AR>,
+            ) -> i32 {
+                let mut snap_amount = 1f64 - f64::EPSILON;
+                if let Some(target) = snap_target {
+                    if !basis_is_width {
+                        snap_amount = self.rounding_loss_based_on_target_width(target.w);
+                    } else {
+                        snap_amount = self.rounding_loss_based_on_target_height(target.h);
+                    }
+                }
+
+                let ratio = self.ratio_f64();
+                let snap_a = if basis_is_width { self.h } else { self.w };
+                let snap_b = if let Some(target) = snap_target {
+                    if basis_is_width { target.h } else { target.w }
+                } else {
+                    snap_a
+                };
+
+                let float = if basis_is_width {
+                    f64::from(basis) / ratio
+                } else {
+                    ratio * f64::from(basis)
+                };
+
+                let delta_a = float - f64::from(snap_a);
+                let delta_b = float - f64::from(snap_b);
+
+                let v = if delta_a.abs() <= snap_amount && delta_a.abs() <= delta_b.abs() {
+                    snap_a
+                } else if delta_b.abs() <= snap_amount {
+                    snap_b
+                } else {
+                    float.round() as i32
+                };
+
+                if v <= 0 { 1 } else { v }
+            }
+
+            fn rounding_loss_based_on_target_width(&self, target_width: i32) -> f64 {
+                let target_x_to_self_x = target_width as f64 / self.w as f64;
+                let recreate_y = self.h as f64 * target_x_to_self_x;
+                let rounded_y = recreate_y.round();
+                let recreate_x_from_rounded_y = rounded_y * self.ratio_f64();
+                (target_width as f64 - recreate_x_from_rounded_y).abs()
+            }
+
+            fn rounding_loss_based_on_target_height(&self, target_height: i32) -> f64 {
+                let target_y_to_self_y = target_height as f64 / self.h as f64;
+                let recreate_x = self.w as f64 * target_y_to_self_y;
+                let rounded_x = recreate_x.round();
+                let recreate_y_from_rounded_x = rounded_x / self.ratio_f64();
+                (target_height as f64 - recreate_y_from_rounded_x).abs()
+            }
+
+            pub fn height_for(&self, w: i32, snap: Option<&AR>) -> i32 {
+                self.proportional(w, true, snap)
+            }
+
+            pub fn width_for(&self, h: i32, snap: Option<&AR>) -> i32 {
+                self.proportional(h, false, snap)
+            }
+
+            /// Inner or outer box using own ratio.
+            pub fn box_of(&self, target: &AR, kind: BoxKind) -> AR {
+                if target.aspect_wider_than(self) == (kind == BoxKind::Inner) {
+                    AR::new(target.w, self.height_for(target.w, Some(target)))
+                } else {
+                    AR::new(self.width_for(target.h, Some(target)), target.h)
+                }
+            }
+
+            pub fn exceeds_any(&self, other: &AR) -> bool {
+                self.w > other.w || self.h > other.h
+            }
+
+            pub fn intersection(&self, other: &AR) -> AR {
+                AR::new(self.w.min(other.w), self.h.min(other.h))
+            }
+
+            pub fn distort_with(&self, other_old: &AR, other_new: &AR) -> AR {
+                let new_w =
+                    (i64::from(self.w) * i64::from(other_new.w) / i64::from(other_old.w)) as i32;
+                let new_h =
+                    (i64::from(self.h) * i64::from(other_new.h) / i64::from(other_old.h)) as i32;
+                AR::new(new_w.max(1), new_h.max(1))
+            }
+
+            pub fn cmp_size(&self, other: &AR) -> (Ordering, Ordering) {
+                (self.w.cmp(&other.w), self.h.cmp(&other.h))
+            }
+        }
+
+        #[derive(Copy, Clone, PartialEq, Debug)]
+        pub enum BoxKind {
+            Inner,
+            Outer,
+        }
+
+        /// Layout state (mirrors imageflow's Layout).
+        #[derive(Copy, Clone, PartialEq, Debug)]
+        pub struct Layout {
+            pub source: AR,
+            pub target: AR,
+            pub canvas: AR,
+            pub image: AR,
+        }
+
+        impl Layout {
+            pub fn create(source: AR, target: AR) -> Self {
+                Layout {
+                    source,
+                    target,
+                    canvas: source,
+                    image: source,
+                }
+            }
+
+            fn scale_canvas(self, target: AR, sizing: BoxKind) -> Self {
+                let new_canvas = self.canvas.box_of(&target, sizing);
+                Layout {
+                    image: self.image.distort_with(&self.canvas, &new_canvas),
+                    canvas: new_canvas,
+                    ..self
+                }
+            }
+
+            fn fill_crop(self, target: AR) -> Self {
+                let new_source = target.box_of(&self.source, BoxKind::Inner);
+                Layout {
+                    source: new_source,
+                    image: target,
+                    canvas: target,
+                    ..self
+                }
+            }
+
+            fn distort_canvas(self, target: AR) -> Self {
+                Layout {
+                    image: self.image.distort_with(&self.canvas, &target),
+                    canvas: target,
+                    ..self
+                }
+            }
+
+            fn pad_canvas(self, target: AR) -> Self {
+                Layout {
+                    canvas: target,
+                    ..self
+                }
+            }
+
+            fn crop(self, target: AR) -> Self {
+                let new_image = self.image.intersection(&target);
+                let new_source = new_image.box_of(&self.source, BoxKind::Inner);
+                Layout {
+                    source: new_source,
+                    image: new_image,
+                    canvas: target,
+                    ..self
+                }
+            }
+
+            fn crop_aspect(self) -> Self {
+                let target_box = self.target.box_of(&self.canvas, BoxKind::Inner);
+                self.crop(target_box)
+            }
+
+            fn pad_aspect(self) -> Self {
+                let target_box = self.target.box_of(&self.canvas, BoxKind::Outer);
+                self.pad_canvas(target_box)
+            }
+
+            fn crop_to_intersection(self) -> Self {
+                let target = self.image.intersection(&self.target);
+                self.crop(target)
+            }
+
+            fn evaluate_condition(&self, c: Cond) -> bool {
+                c.matches(self.canvas.cmp_size(&self.target))
+            }
+
+            pub fn execute_all(self, steps: &[Step]) -> Self {
+                let mut lay = self;
+                let mut skipping = false;
+                for step in steps {
+                    match *step {
+                        Step::SkipIf(c) if lay.evaluate_condition(c) => {
+                            skipping = true;
+                        }
+                        Step::SkipUnless(c) if !lay.evaluate_condition(c) => {
+                            skipping = true;
+                        }
+                        Step::BeginSequence => {
+                            skipping = false;
+                        }
+                        _ => {}
+                    }
+                    if !skipping {
+                        lay = lay.execute_step(*step);
+                    }
+                }
+                lay
+            }
+
+            fn execute_step(self, step: Step) -> Self {
+                match step {
+                    Step::None | Step::BeginSequence | Step::SkipIf(_) | Step::SkipUnless(_) => {
+                        self
+                    }
+                    Step::ScaleToOuter => self.scale_canvas(self.target, BoxKind::Outer),
+                    Step::FillCrop => self.fill_crop(self.target),
+                    Step::ScaleToInner => self.scale_canvas(self.target, BoxKind::Inner),
+                    Step::PadAspect => self.pad_aspect(),
+                    Step::Pad => self.pad_canvas(self.target),
+                    Step::CropAspect => self.crop_aspect(),
+                    Step::Crop => self.crop(self.target),
+                    Step::CropToIntersection => self.crop_to_intersection(),
+                    Step::Distort => self.distort_canvas(self.target),
+                }
+            }
+        }
+
+        #[derive(Copy, Clone, PartialEq, Debug)]
+        pub enum Cond {
+            Both(Ordering),
+            Neither(Ordering),
+            Either(Ordering),
+            Larger1DSmaller1D,
+        }
+
+        impl Cond {
+            pub fn matches(&self, cmp: (Ordering, Ordering)) -> bool {
+                match *self {
+                    Cond::Both(v) => cmp.0 == v && cmp.1 == v,
+                    Cond::Neither(v) => cmp.0 != v && cmp.1 != v,
+                    Cond::Either(v) => cmp.0 == v || cmp.1 == v,
+                    Cond::Larger1DSmaller1D => {
+                        cmp == (Ordering::Greater, Ordering::Less)
+                            || cmp == (Ordering::Less, Ordering::Greater)
+                    }
+                }
+            }
+        }
+
+        #[derive(Copy, Clone, PartialEq, Debug)]
+        pub enum Step {
+            None,
+            BeginSequence,
+            SkipIf(Cond),
+            SkipUnless(Cond),
+            ScaleToOuter,
+            ScaleToInner,
+            FillCrop,
+            Distort,
+            Pad,
+            PadAspect,
+            Crop,
+            CropAspect,
+            CropToIntersection,
+        }
+
+        /// Step sequences matching exactly what ir4/layout.rs build_constraints()
+        /// produces for each (FitMode, ScaleMode) combination that maps to a
+        /// zenlayout ConstraintMode.
+        pub fn steps_for_mode(mode: super::ConstraintMode) -> Vec<Step> {
+            use super::ConstraintMode as CM;
+
+            match mode {
+                // Stretch + Both → distort(target)
+                CM::Distort => vec![Step::Distort],
+
+                // Max + DownscaleOnly → skip_unless(Either(Greater)), scale_to_inner
+                CM::Within => vec![
+                    Step::SkipUnless(Cond::Either(Ordering::Greater)),
+                    Step::ScaleToInner,
+                ],
+
+                // Max + Both → scale_to_inner (always)
+                CM::Fit => vec![Step::ScaleToInner],
+
+                // Crop + Both → scale_to_outer, crop
+                CM::FitCrop => vec![Step::ScaleToOuter, Step::Crop],
+
+                // Crop + DownscaleOnly (from ir4/layout.rs:240-252)
+                CM::WithinCrop => vec![
+                    Step::SkipIf(Cond::Either(Ordering::Less)),
+                    Step::ScaleToOuter,
+                    Step::Crop,
+                    Step::BeginSequence,
+                    Step::SkipUnless(Cond::Larger1DSmaller1D),
+                    Step::CropToIntersection,
+                ],
+
+                // Pad + Both → scale_to_inner, pad
+                CM::FitPad => vec![Step::ScaleToInner, Step::Pad],
+
+                // Pad + DownscaleOnly (from ir4/layout.rs:197-200)
+                CM::WithinPad => vec![
+                    Step::SkipUnless(Cond::Either(Ordering::Greater)),
+                    Step::ScaleToInner,
+                    Step::Pad,
+                ],
+
+                // AspectCrop → crop_aspect (always)
+                CM::AspectCrop => vec![Step::CropAspect],
+            }
+        }
+
+        /// Gravity alignment (center only for parity — imageflow defaults to center).
+        pub fn gravity_offset(inner: i32, outer: i32) -> i32 {
+            (outer - inner) / 2
+        }
+    }
+
+    /// Parity test: run both zenlayout and the oracle, compare results.
+    fn parity_check(mode: ConstraintMode, source_w: u32, source_h: u32, tw: u32, th: u32) {
+        // Skip zero dimensions
+        if source_w == 0 || source_h == 0 || tw == 0 || th == 0 {
+            return;
+        }
+        // Skip overflow-prone sizes
+        if source_w > 100_000 || source_h > 100_000 || tw > 100_000 || th > 100_000 {
+            return;
+        }
+
+        // --- Oracle ---
+        let source = oracle::AR::new(source_w as i32, source_h as i32);
+        let target = oracle::AR::new(tw as i32, th as i32);
+        let steps = oracle::steps_for_mode(mode);
+        let layout = oracle::Layout::create(source, target).execute_all(&steps);
+
+        // Oracle results
+        let oracle_image = (layout.image.w as u32, layout.image.h as u32);
+        let oracle_canvas = (layout.canvas.w as u32, layout.canvas.h as u32);
+        let oracle_crop = (layout.source.w as u32, layout.source.h as u32);
+
+        // --- Zenlayout ---
+        let zl = match Constraint::new(mode, tw, th).compute(source_w, source_h) {
+            Ok(l) => l,
+            Err(_) => return, // zenlayout errors on edge cases oracle might handle differently
+        };
+
+        let zl_image = zl.resize_to;
+        let zl_canvas = zl.canvas;
+        let zl_crop = match zl.source_crop {
+            Some(r) => (r.width, r.height),
+            None => (source_w, source_h),
+        };
+
+        // Compare
+        assert_eq!(
+            zl_image, oracle_image,
+            "IMAGE mismatch for {mode:?} {source_w}x{source_h} → {tw}x{th}: \
+             zenlayout={zl_image:?} oracle={oracle_image:?}"
+        );
+        assert_eq!(
+            zl_canvas, oracle_canvas,
+            "CANVAS mismatch for {mode:?} {source_w}x{source_h} → {tw}x{th}: \
+             zenlayout={zl_canvas:?} oracle={oracle_canvas:?}"
+        );
+        assert_eq!(
+            zl_crop, oracle_crop,
+            "CROP mismatch for {mode:?} {source_w}x{source_h} → {tw}x{th}: \
+             zenlayout={zl_crop:?} oracle={oracle_crop:?}"
+        );
+    }
+
+    /// Source sizes to test against: a variety of aspect ratios and dimensions.
+    fn parity_source_sizes() -> Vec<(u32, u32)> {
+        let mut sizes = Vec::new();
+        // Fixed interesting sizes
+        let fixed = [
+            (1, 1),
+            (1, 3),
+            (3, 1),
+            (2, 4),
+            (4, 2),
+            (100, 100),
+            (1000, 500),
+            (500, 1000),
+            (1200, 400),
+            (400, 1200),
+            (1399, 697),
+            (697, 1399),
+            (1621, 883),
+            (883, 1621),
+            (971, 967),
+            (967, 971),
+            (5104, 3380),
+            (3380, 5104),
+            (638, 423),
+            (423, 638),
+            (768, 433),
+            (433, 768),
+        ];
+        sizes.extend_from_slice(&fixed);
+
+        // Variations of each target size
+        for &(tw, th) in &TARGETS {
+            // Larger than target
+            sizes.push((tw * 2, th * 2));
+            sizes.push((tw * 3, th * 2));
+            sizes.push((tw * 2, th * 3));
+            sizes.push((tw * 10, th * 10));
+            // Smaller than target
+            if tw > 2 && th > 2 {
+                sizes.push((tw / 2, th / 2));
+                sizes.push((tw / 3 + 1, th / 2));
+                sizes.push((tw / 2, th / 3 + 1));
+            }
+            // One larger, one smaller (mixed)
+            sizes.push((tw * 2, th / 2 + 1));
+            sizes.push((tw / 2 + 1, th * 2));
+            // Exact match
+            sizes.push((tw, th));
+            // Off by one
+            sizes.push((tw + 1, th + 1));
+            if tw > 1 && th > 1 {
+                sizes.push((tw - 1, th - 1));
+            }
+        }
+
+        sizes.sort();
+        sizes.dedup();
+        // Filter out zeros
+        sizes.retain(|&(w, h)| w > 0 && h > 0);
+        sizes
+    }
+
+    #[test]
+    fn parity_distort() {
+        let sources = parity_source_sizes();
+        let mut count = 0u64;
+        for &(tw, th) in &TARGETS {
+            for &(sw, sh) in &sources {
+                parity_check(ConstraintMode::Distort, sw, sh, tw, th);
+                count += 1;
+            }
+        }
+        assert!(count > 500, "Expected >500 combinations, got {count}");
+    }
+
+    #[test]
+    fn parity_within() {
+        let sources = parity_source_sizes();
+        let mut count = 0u64;
+        for &(tw, th) in &TARGETS {
+            for &(sw, sh) in &sources {
+                parity_check(ConstraintMode::Within, sw, sh, tw, th);
+                count += 1;
+            }
+        }
+        assert!(count > 500, "Expected >500 combinations, got {count}");
+    }
+
+    #[test]
+    fn parity_fit() {
+        let sources = parity_source_sizes();
+        let mut count = 0u64;
+        for &(tw, th) in &TARGETS {
+            for &(sw, sh) in &sources {
+                parity_check(ConstraintMode::Fit, sw, sh, tw, th);
+                count += 1;
+            }
+        }
+        assert!(count > 500, "Expected >500 combinations, got {count}");
+    }
+
+    #[test]
+    fn parity_fit_crop() {
+        let sources = parity_source_sizes();
+        let mut count = 0u64;
+        for &(tw, th) in &TARGETS {
+            for &(sw, sh) in &sources {
+                parity_check(ConstraintMode::FitCrop, sw, sh, tw, th);
+                count += 1;
+            }
+        }
+        assert!(count > 500, "Expected >500 combinations, got {count}");
+    }
+
+    #[test]
+    fn parity_within_crop() {
+        let sources = parity_source_sizes();
+        let mut count = 0u64;
+        for &(tw, th) in &TARGETS {
+            for &(sw, sh) in &sources {
+                parity_check(ConstraintMode::WithinCrop, sw, sh, tw, th);
+                count += 1;
+            }
+        }
+        assert!(count > 500, "Expected >500 combinations, got {count}");
+    }
+
+    #[test]
+    fn parity_fit_pad() {
+        let sources = parity_source_sizes();
+        let mut count = 0u64;
+        for &(tw, th) in &TARGETS {
+            for &(sw, sh) in &sources {
+                parity_check(ConstraintMode::FitPad, sw, sh, tw, th);
+                count += 1;
+            }
+        }
+        assert!(count > 500, "Expected >500 combinations, got {count}");
+    }
+
+    #[test]
+    fn parity_within_pad() {
+        let sources = parity_source_sizes();
+        let mut count = 0u64;
+        for &(tw, th) in &TARGETS {
+            for &(sw, sh) in &sources {
+                parity_check(ConstraintMode::WithinPad, sw, sh, tw, th);
+                count += 1;
+            }
+        }
+        assert!(count > 500, "Expected >500 combinations, got {count}");
+    }
+
+    #[test]
+    fn parity_aspect_crop() {
+        let sources = parity_source_sizes();
+        let mut count = 0u64;
+        for &(tw, th) in &TARGETS {
+            for &(sw, sh) in &sources {
+                parity_check(ConstraintMode::AspectCrop, sw, sh, tw, th);
+                count += 1;
+            }
+        }
+        assert!(count > 500, "Expected >500 combinations, got {count}");
     }
 }
