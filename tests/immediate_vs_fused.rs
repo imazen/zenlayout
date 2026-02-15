@@ -350,6 +350,7 @@ fn immediate_eval(source: &Grid, commands: &[Command]) -> Grid {
             Command::Pad(p) => {
                 current = current.pad(p.top, p.right, p.bottom, p.left);
             }
+            _ => {}
         }
     }
     current

@@ -66,6 +66,7 @@ pub enum ConstraintMode {
 }
 
 /// Where to position the image when cropping or padding.
+#[non_exhaustive]
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub enum Gravity {
     /// Center on both axes.
@@ -80,6 +81,7 @@ pub enum Gravity {
 /// `Srgb` is for user-facing colors in standard sRGB. `Linear` is for callers
 /// already working in linear light (avoids unnecessary color space round-trips
 /// during resize). Both carry alpha.
+#[non_exhaustive]
 #[derive(Copy, Clone, Debug, Default)]
 pub enum CanvasColor {
     /// Transparent black `[0, 0, 0, 0]` (premultiplied-alpha convention:
@@ -751,6 +753,7 @@ impl Layout {
 }
 
 /// Layout computation error.
+#[non_exhaustive]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum LayoutError {
     /// Source image has zero width or height.

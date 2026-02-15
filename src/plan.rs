@@ -209,6 +209,7 @@ impl SourceCrop {
 }
 
 /// A single image processing command.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     /// Apply EXIF orientation correction (value 1-8).
