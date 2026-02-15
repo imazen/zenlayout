@@ -751,6 +751,18 @@ pub enum LayoutError {
     ZeroTargetDimension,
 }
 
+impl core::fmt::Display for LayoutError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ZeroSourceDimension => f.write_str("source image has zero width or height"),
+            Self::ZeroTargetDimension => f.write_str("target width or height is zero"),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for LayoutError {}
+
 // ============================================================================
 // Internal geometry
 // ============================================================================

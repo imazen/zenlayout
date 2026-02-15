@@ -240,9 +240,9 @@ impl Subsampling {
     }
 
     /// MCU dimensions in luma pixels for this subsampling scheme.
-    pub const fn mcu_size(self) -> (u32, u32) {
+    pub const fn mcu_size(self) -> Size {
         let (h, v) = self.factors();
-        (8 * h, 8 * v)
+        Size::new(8 * h, 8 * v)
     }
 
     /// [`Align::Extend`] for JPEG MCU alignment with this subsampling.
@@ -250,8 +250,8 @@ impl Subsampling {
     /// Use with [`OutputLimits::align`] to extend the canvas to
     /// MCU boundaries with edge replication.
     pub const fn mcu_align(self) -> Align {
-        let (mcu_w, mcu_h) = self.mcu_size();
-        Align::Extend(mcu_w, mcu_h)
+        let mcu = self.mcu_size();
+        Align::Extend(mcu.width, mcu.height)
     }
 }
 
@@ -325,14 +325,14 @@ impl CodecLayout {
     pub fn new(canvas: Size, subsampling: Subsampling) -> Self {
         let (w, h) = (canvas.width, canvas.height);
         let (h_factor, v_factor) = subsampling.factors();
-        let (mcu_w, mcu_h) = subsampling.mcu_size();
+        let mcu = subsampling.mcu_size();
 
         // Extend to MCU boundary (should already be aligned if using mcu_align).
-        let ext_w = w.div_ceil(mcu_w) * mcu_w;
-        let ext_h = h.div_ceil(mcu_h) * mcu_h;
+        let ext_w = w.div_ceil(mcu.width) * mcu.width;
+        let ext_h = h.div_ceil(mcu.height) * mcu.height;
 
-        let mcu_cols = ext_w / mcu_w;
-        let mcu_rows = ext_h / mcu_h;
+        let mcu_cols = ext_w / mcu.width;
+        let mcu_rows = ext_h / mcu.height;
 
         let luma = PlaneLayout {
             content: Size::new(w, h),
@@ -357,10 +357,10 @@ impl CodecLayout {
             luma,
             chroma,
             subsampling,
-            mcu_size: Size::new(mcu_w, mcu_h),
+            mcu_size: mcu,
             mcu_cols,
             mcu_rows,
-            luma_rows_per_mcu: mcu_h,
+            luma_rows_per_mcu: mcu.height,
         }
     }
 }
