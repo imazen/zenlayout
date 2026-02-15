@@ -1485,12 +1485,11 @@ pub fn compute_layout_sequential(
         None
     };
 
-    // Phase 4b: Apply post-constrain orientation to the layout.
-    // This transforms canvas, resize_to, and placement as if the output
-    // were rotated/flipped after resizing.
-    if !post_orientation.is_identity() {
-        apply_post_orientation(&mut layout, post_orientation);
-    }
+    // Note: No separate post-orientation transform of the layout is needed.
+    // The constraint target swap (for axis-swapping orientations) + fusion
+    // into pre-orientation already produces the correct output geometry.
+    // Non-axis-swapping orientations (flip, rot180) are handled entirely
+    // by the pre-orientation source transform.
 
     // Phase 5: Apply limits.
     let (layout, content_size) = if let Some(mc) = limits {
@@ -1523,38 +1522,6 @@ pub fn compute_layout_sequential(
 
 /// Compose two regions: `outer` defines a viewport, `inner` is relative to
 /// that viewport's coordinate system. Result is in the original source coords.
-/// Apply a post-constrain orientation to the layout's output dimensions.
-///
-/// Transforms canvas, resize_to, and placement as if the entire output
-/// were rotated/flipped after resizing. This is used by sequential mode
-/// when orientation commands appear after a constrain.
-fn apply_post_orientation(layout: &mut Layout, orient: Orientation) {
-    let cw = layout.canvas.width;
-    let ch = layout.canvas.height;
-    let rw = layout.resize_to.width;
-    let rh = layout.resize_to.height;
-    let (px, py) = layout.placement;
-
-    if orient.swaps_axes() {
-        layout.canvas = Size::new(ch, cw);
-        layout.resize_to = Size::new(rh, rw);
-    }
-
-    // Transform placement: where does the content top-left end up?
-    // Content occupies [px, px+rw) × [py, py+rh) on the canvas.
-    // After orientation, the top-left corner of the content moves.
-    layout.placement = match orient {
-        Orientation::Identity => (px, py),
-        Orientation::FlipH => (cw as i32 - px - rw as i32, py),
-        Orientation::Rotate180 => (cw as i32 - px - rw as i32, ch as i32 - py - rh as i32),
-        Orientation::FlipV => (px, ch as i32 - py - rh as i32),
-        Orientation::Rotate90 => (ch as i32 - py - rh as i32, px),
-        Orientation::Transpose => (py, px),
-        Orientation::Rotate270 => (py, cw as i32 - px - rw as i32),
-        Orientation::Transverse => (ch as i32 - py - rh as i32, cw as i32 - px - rw as i32),
-    };
-}
-
 fn compose_regions(outer: Region, inner: Region, source_w: u32, source_h: u32) -> Region {
     // Resolve outer to absolute coordinates
     let (ol, ot, or_, ob) = outer.resolve(source_w, source_h);
