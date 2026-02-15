@@ -9,6 +9,21 @@ use crate::constraint::{Rect, Size};
 ///
 /// The composition rule matches the D4 Cayley table verified against
 /// zenjpeg's `coeff_transform.rs`.
+///
+/// ```text
+///     EXIF orientations and their transforms:
+///
+///     1: Identity    2: FlipH       3: Rotate180   4: FlipV
+///     ┌───┐          ┌───┐          ┌───┐          ┌───┐
+///     │ F │          │ Ꟊ │          │   │          │   │
+///     │   │          │   │          │ Ꟊ │          │ F │
+///     └───┘          └───┘          └───┘          └───┘
+///
+///     5: Transpose   6: Rotate90    7: Transverse  8: Rotate270
+///     ┌────┐         ┌────┐         ┌────┐         ┌────┐
+///     │ F  │         │  F │         │  Ꟊ │         │ Ꟊ  │
+///     └────┘         └────┘         └────┘         └────┘
+/// ```
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Orientation {
     /// Rotation in 90-degree increments (0-3). 0=0°, 1=90°, 2=180°, 3=270°.

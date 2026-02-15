@@ -19,6 +19,18 @@
 //! ```
 
 /// How to fit a source image into target dimensions.
+///
+/// ```text
+///     Source 4:3, Target 1:1 (square):
+///
+///     Fit           Within         FitCrop       FitPad
+///     ┌───┐         ┌───┐          ┌───┐         ┌─────┐
+///     │   │         │   │          │ █ │         │     │
+///     │   │         │   │          │ █ │         │ ███ │
+///     │   │         │   │(smaller) │ █ │         │     │
+///     └───┘         └───┘          └───┘         └─────┘
+///     exact size    ≤ source       fills+crops    fits+pads
+/// ```
 #[non_exhaustive]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ConstraintMode {
@@ -659,6 +671,25 @@ impl Constraint {
 /// - Which region of the source to read
 /// - What dimensions to resize to
 /// - Final canvas size and image placement (for padding)
+///
+/// # Layout geometry
+///
+/// ```text
+///     ┌─────────────── canvas ───────────────┐
+///     │                                       │
+///     │    placement ──┐                      │
+///     │    (x offset)  │                      │
+///     │                ▼                      │
+///     │         ┌── resize_to ──┐             │
+///     │         │               │             │
+///     │         │    image      │             │
+///     │         │               │             │
+///     │         └───────────────┘             │
+///     │                                       │
+///     └───────────────────────────────────────┘
+///
+///     source_crop ──► resize_to ──► placed on canvas
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Layout {
     /// Original source dimensions.

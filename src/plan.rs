@@ -3,6 +3,25 @@
 //! Two-phase layout planning:
 //! 1. [`compute_layout()`] — compute ideal layout from commands + source dimensions → [`IdealLayout`] + [`DecoderRequest`]
 //! 2. [`IdealLayout::finalize()`] — given what the decoder actually did ([`DecoderOffer`]), compute remaining work → [`LayoutPlan`]
+//!
+//! ```text
+//!     Commands + Source
+//!           │
+//!           ▼
+//!     ┌──────────────┐     ┌──────────────┐
+//!     │compute_layout│────►│DecoderRequest│───► Decoder
+//!     └──────────────┘     └──────────────┘        │
+//!           │                                      │
+//!           ▼                                      ▼
+//!     ┌───────────┐       ┌─────────────┐    ┌───────────┐
+//!     │IdealLayout│──────►│ finalize()  │◄───│DecoderOffer│
+//!     └───────────┘       └─────────────┘    └───────────┘
+//!                               │
+//!                               ▼
+//!                         ┌──────────┐
+//!                         │LayoutPlan│ ── final operations
+//!                         └──────────┘
+//! ```
 
 use crate::constraint::{
     CanvasColor, Constraint, ConstraintMode, Layout, LayoutError, Rect, Size, SourceCrop,
@@ -152,6 +171,14 @@ pub struct LayoutPlan {
 ///
 /// All variants take `(x_align, y_align)` for per-axis alignment.
 /// Use [`Subsampling::mcu_align()`] for JPEG MCU-aligned extend.
+///
+/// ```text
+///     Source: 801x601, align to mod-16
+///
+///     Crop:     800x592  --  round down, lose edge pixels
+///     Extend:   816x608  --  round up, replicate edges, content_size=(801,601)
+///     Distort:  800x608  --  round to nearest, slight stretch
+/// ```
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Align {
     /// Round canvas down to nearest multiple per axis. Loses up to `n-1`
@@ -349,6 +376,22 @@ impl CodecLayout {
 ///
 /// Applied to the [`Layout`] after constraint + padding computation, before
 /// source crop is transformed back to source coordinates.
+///
+/// ```text
+///     Layout from constraint
+///           │
+///           ▼
+///     ┌─── max ───┐   Scale down proportionally if canvas > max
+///     │            │
+///     ▼            │
+///     ┌─── min ───┐   Scale up proportionally if canvas < min
+///     │            │   (re-applies max if min overshot -- max wins)
+///     ▼            │
+///     ┌── align ──┐   Snap to codec multiples (Crop/Extend/Distort)
+///     │            │   NOTE: may slightly exceed max or drop below min
+///     ▼
+///     Final Layout
+/// ```
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct OutputLimits {
     /// Maximum canvas dimensions. If exceeded, everything scales down proportionally.
