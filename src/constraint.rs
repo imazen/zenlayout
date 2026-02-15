@@ -749,6 +749,8 @@ pub enum LayoutError {
     ZeroSourceDimension,
     /// Target width or height is zero.
     ZeroTargetDimension,
+    /// Region viewport has zero or negative width or height.
+    ZeroRegionDimension,
 }
 
 impl core::fmt::Display for LayoutError {
@@ -756,6 +758,9 @@ impl core::fmt::Display for LayoutError {
         match self {
             Self::ZeroSourceDimension => f.write_str("source image has zero width or height"),
             Self::ZeroTargetDimension => f.write_str("target width or height is zero"),
+            Self::ZeroRegionDimension => {
+                f.write_str("region viewport has zero or negative width or height")
+            }
         }
     }
 }

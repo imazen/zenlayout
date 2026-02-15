@@ -22,5 +22,6 @@ pub use constraint::{
 pub use orientation::Orientation;
 pub use plan::{
     Align, CodecLayout, Command, DecoderOffer, DecoderRequest, FlipAxis, IdealLayout, LayoutPlan,
-    OutputLimits, Padding, Pipeline, PlaneLayout, Rotation, Subsampling, compute_layout,
+    OutputLimits, Padding, Pipeline, PlaneLayout, Region, RegionCoord, Rotation, Subsampling,
+    compute_layout,
 };

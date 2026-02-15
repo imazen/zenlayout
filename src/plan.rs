@@ -48,6 +48,156 @@ pub enum FlipAxis {
     Vertical,
 }
 
+/// A coordinate in the region viewport, expressed as a percentage of the
+/// source dimension plus a pixel offset.
+///
+/// Resolved as: `source_dimension * percent + pixels`
+///
+/// # Examples
+///
+/// - `RegionCoord::px(0)` — source origin
+/// - `RegionCoord::px(-50)` — 50px before source origin (padding area)
+/// - `RegionCoord::pct(1.0)` — source far edge
+/// - `RegionCoord::pct_px(1.0, 50)` — 50px past source far edge (padding area)
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct RegionCoord {
+    /// Fraction of source dimension (0.0 = origin, 1.0 = far edge).
+    pub percent: f32,
+    /// Additional pixel offset (can be negative).
+    pub pixels: i32,
+}
+
+impl RegionCoord {
+    /// Coordinate at a pixel offset from the source origin.
+    pub const fn px(pixels: i32) -> Self {
+        Self {
+            percent: 0.0,
+            pixels,
+        }
+    }
+
+    /// Coordinate at a percentage of source dimension.
+    pub const fn pct(percent: f32) -> Self {
+        Self {
+            percent,
+            pixels: 0,
+        }
+    }
+
+    /// Coordinate at a percentage plus pixel offset.
+    pub const fn pct_px(percent: f32, pixels: i32) -> Self {
+        Self { percent, pixels }
+    }
+
+    /// Resolve to absolute pixel coordinate given source dimension.
+    pub fn resolve(self, source_dim: u32) -> i32 {
+        (source_dim as f64 * self.percent as f64).round() as i32 + self.pixels
+    }
+}
+
+/// A viewport rectangle in source coordinates defining a window into an
+/// infinite canvas.
+///
+/// The source image occupies `[0, source_w) × [0, source_h)`. Areas of the
+/// viewport outside the source are filled with `color`. Areas of the source
+/// outside the viewport are cropped.
+///
+/// This unifies crop and pad into a single operation:
+/// - Viewport smaller than source → crop
+/// - Viewport extending beyond source → pad
+/// - Viewport entirely outside source → blank canvas
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Region {
+    /// Left edge of viewport in source x-coordinates.
+    pub left: RegionCoord,
+    /// Top edge of viewport in source y-coordinates.
+    pub top: RegionCoord,
+    /// Right edge of viewport in source x-coordinates.
+    pub right: RegionCoord,
+    /// Bottom edge of viewport in source y-coordinates.
+    pub bottom: RegionCoord,
+    /// Fill color for areas outside the source image.
+    pub color: CanvasColor,
+}
+
+impl Region {
+    /// Viewport from pixel edges (transparent fill).
+    pub const fn crop(left: i32, top: i32, right: i32, bottom: i32) -> Self {
+        Self {
+            left: RegionCoord::px(left),
+            top: RegionCoord::px(top),
+            right: RegionCoord::px(right),
+            bottom: RegionCoord::px(bottom),
+            color: CanvasColor::Transparent,
+        }
+    }
+
+    /// Uniform padding around the full source.
+    pub const fn padded(amount: u32, color: CanvasColor) -> Self {
+        Self {
+            left: RegionCoord::px(-(amount as i32)),
+            top: RegionCoord::px(-(amount as i32)),
+            right: RegionCoord::pct_px(1.0, amount as i32),
+            bottom: RegionCoord::pct_px(1.0, amount as i32),
+            color,
+        }
+    }
+
+    /// Blank canvas (viewport entirely outside source).
+    ///
+    /// Creates a viewport at a large negative offset with the given dimensions,
+    /// so it doesn't overlap the source at all.
+    pub const fn blank(width: u32, height: u32, color: CanvasColor) -> Self {
+        // Place viewport far from source so there's no overlap
+        let offset = -1_000_000i32;
+        Self {
+            left: RegionCoord::px(offset),
+            top: RegionCoord::px(offset),
+            right: RegionCoord::px(offset + width as i32),
+            bottom: RegionCoord::px(offset + height as i32),
+            color,
+        }
+    }
+
+    /// Resolve all coordinates against source dimensions.
+    /// Returns `(left, top, right, bottom)` in absolute pixels.
+    fn resolve(self, source_w: u32, source_h: u32) -> (i32, i32, i32, i32) {
+        (
+            self.left.resolve(source_w),
+            self.top.resolve(source_h),
+            self.right.resolve(source_w),
+            self.bottom.resolve(source_h),
+        )
+    }
+}
+
+impl SourceCrop {
+    /// Convert to an equivalent Region (viewport coordinates, transparent fill).
+    pub fn to_region(self) -> Region {
+        match self {
+            Self::Pixels(r) => Region {
+                left: RegionCoord::px(r.x as i32),
+                top: RegionCoord::px(r.y as i32),
+                right: RegionCoord::px((r.x + r.width) as i32),
+                bottom: RegionCoord::px((r.y + r.height) as i32),
+                color: CanvasColor::Transparent,
+            },
+            Self::Percent {
+                x,
+                y,
+                width,
+                height,
+            } => Region {
+                left: RegionCoord::pct(x),
+                top: RegionCoord::pct(y),
+                right: RegionCoord::pct(x + width),
+                bottom: RegionCoord::pct(y + height),
+                color: CanvasColor::Transparent,
+            },
+        }
+    }
+}
+
 /// A single image processing command.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
@@ -59,6 +209,8 @@ pub enum Command {
     Flip(FlipAxis),
     /// Crop in post-orientation coordinates.
     Crop(SourceCrop),
+    /// Viewport region in post-orientation coordinates. Unifies crop and pad.
+    Region(Region),
     /// Constrain dimensions in post-orientation coordinates.
     Constrain {
         /// The constraint to apply.
@@ -588,6 +740,7 @@ pub struct Pipeline {
     source_h: u32,
     orientation: Orientation,
     crop: Option<SourceCrop>,
+    region: Option<Region>,
     constraint: Option<Constraint>,
     padding: Option<Padding>,
     limits: Option<OutputLimits>,
@@ -601,6 +754,7 @@ impl Pipeline {
             source_h,
             orientation: Orientation::Identity,
             crop: None,
+            region: None,
             constraint: None,
             padding: None,
             limits: None,
@@ -667,6 +821,45 @@ impl Pipeline {
             self.crop = Some(source_crop);
         }
         self
+    }
+
+    /// Define a viewport region in source coordinates (post-orientation).
+    ///
+    /// Occupies the crop/region slot (first one wins in fixed mode).
+    /// If a crop was already set, this is ignored.
+    pub fn region(mut self, region: Region) -> Self {
+        if self.crop.is_none() && self.region.is_none() {
+            self.region = Some(region);
+        }
+        self
+    }
+
+    /// Convenience: viewport from pixel edges.
+    pub fn region_viewport(
+        self,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        color: CanvasColor,
+    ) -> Self {
+        self.region(Region {
+            left: RegionCoord::px(left),
+            top: RegionCoord::px(top),
+            right: RegionCoord::px(right),
+            bottom: RegionCoord::px(bottom),
+            color,
+        })
+    }
+
+    /// Convenience: uniform padding via region.
+    pub fn region_pad(self, amount: u32, color: CanvasColor) -> Self {
+        self.region(Region::padded(amount, color))
+    }
+
+    /// Convenience: blank canvas (no source content).
+    pub fn region_blank(self, width: u32, height: u32, color: CanvasColor) -> Self {
+        self.region(Region::blank(width, height, color))
     }
 
     /// Fit within target dimensions, preserving aspect ratio. May upscale.
@@ -755,6 +948,7 @@ impl Pipeline {
             self.source_h,
             self.orientation,
             self.crop.as_ref(),
+            self.region,
             self.constraint.as_ref(),
             self.padding,
             self.limits.as_ref(),
@@ -945,6 +1139,7 @@ pub fn compute_layout(
 ) -> Result<(IdealLayout, DecoderRequest), LayoutError> {
     let mut orientation = Orientation::Identity;
     let mut crop: Option<&SourceCrop> = None;
+    let mut region: Option<Region> = None;
     let mut constraint: Option<&Constraint> = None;
     let mut padding: Option<Padding> = None;
 
@@ -971,8 +1166,13 @@ pub fn compute_layout(
                 orientation = orientation.compose(o);
             }
             Command::Crop(c) => {
-                if crop.is_none() {
+                if crop.is_none() && region.is_none() {
                     crop = Some(c);
+                }
+            }
+            Command::Region(r) => {
+                if crop.is_none() && region.is_none() {
+                    region = Some(*r);
                 }
             }
             Command::Constrain { constraint: c } => {
@@ -1005,18 +1205,21 @@ pub fn compute_layout(
         source_h,
         orientation,
         crop,
+        region,
         constraint,
         padding,
         limits,
     )
 }
 
-/// Core layout computation shared by [`plan()`] and [`Pipeline::plan()`].
+/// Core layout computation shared by [`compute_layout()`] and [`Pipeline::plan()`].
+#[allow(clippy::too_many_arguments)]
 fn plan_from_parts(
     source_w: u32,
     source_h: u32,
     orientation: Orientation,
     crop: Option<&SourceCrop>,
+    region: Option<Region>,
     constraint: Option<&Constraint>,
     padding: Option<Padding>,
     limits: Option<&OutputLimits>,
@@ -1029,23 +1232,18 @@ fn plan_from_parts(
     let oriented = orientation.transform_dimensions(source_w, source_h);
     let (ow, oh) = (oriented.width, oriented.height);
 
+    // Convert crop to region if present (region is the canonical form).
+    let effective_region = if let Some(sc) = crop {
+        Some(sc.to_region())
+    } else {
+        region
+    };
+
     // 2. Compute layout in post-orientation space.
-    let layout = if let Some(c) = constraint {
-        let mut builder = c.clone();
-        if let Some(sc) = crop {
-            builder = builder.source_crop(*sc);
-        }
-        builder.compute(ow, oh)?
-    } else if let Some(sc) = crop {
-        let rect = sc.resolve(ow, oh);
-        Layout {
-            source: Size::new(ow, oh),
-            source_crop: Some(rect),
-            resize_to: Size::new(rect.width, rect.height),
-            canvas: Size::new(rect.width, rect.height),
-            placement: (0, 0),
-            canvas_color: CanvasColor::default(),
-        }
+    let layout = if let Some(reg) = effective_region {
+        resolve_region(reg, ow, oh, constraint)?
+    } else if let Some(c) = constraint {
+        c.clone().compute(ow, oh)?
     } else {
         Layout {
             source: Size::new(ow, oh),
@@ -1099,6 +1297,112 @@ fn plan_from_parts(
     };
 
     Ok((ideal, request))
+}
+
+/// Resolve a Region into a Layout.
+///
+/// The region defines a viewport in source coordinates. We compute:
+/// 1. Viewport dimensions from resolved coordinates
+/// 2. Overlap between viewport and source image
+/// 3. Source crop (the overlap rect)
+/// 4. Placement (where source content sits within the viewport)
+/// 5. If a constraint is present, it operates on the overlap (effective source)
+fn resolve_region(
+    reg: Region,
+    source_w: u32,
+    source_h: u32,
+    constraint: Option<&Constraint>,
+) -> Result<Layout, LayoutError> {
+    let (left, top, right, bottom) = reg.resolve(source_w, source_h);
+
+    let vw = right - left;
+    let vh = bottom - top;
+    if vw <= 0 || vh <= 0 {
+        return Err(LayoutError::ZeroRegionDimension);
+    }
+    let vw = vw as u32;
+    let vh = vh as u32;
+
+    // Compute overlap with source [0, source_w) × [0, source_h)
+    let ol = left.max(0);
+    let ot = top.max(0);
+    let or_ = right.min(source_w as i32);
+    let ob = bottom.min(source_h as i32);
+
+    let has_overlap = ol < or_ && ot < ob;
+
+    if !has_overlap {
+        // Blank canvas — no source content visible
+        let layout = Layout {
+            source: Size::new(source_w, source_h),
+            source_crop: None,
+            resize_to: Size::new(vw, vh),
+            canvas: Size::new(vw, vh),
+            placement: (0, 0),
+            canvas_color: reg.color,
+        };
+        return Ok(layout);
+    }
+
+    let overlap_x = ol as u32;
+    let overlap_y = ot as u32;
+    let overlap_w = (or_ - ol) as u32;
+    let overlap_h = (ob - ot) as u32;
+
+    // Where the overlap sits within the viewport
+    let place_x = (ol - left) as u32;
+    let place_y = (ot - top) as u32;
+
+    // Is the overlap the full source? If so, no crop needed.
+    let source_crop = if overlap_x == 0
+        && overlap_y == 0
+        && overlap_w == source_w
+        && overlap_h == source_h
+    {
+        None
+    } else {
+        Some(Rect::new(overlap_x, overlap_y, overlap_w, overlap_h))
+    };
+
+    // Is the viewport exactly the overlap? (pure crop, no padding)
+    let is_pure_crop = place_x == 0 && place_y == 0 && vw == overlap_w && vh == overlap_h;
+
+    if let Some(c) = constraint {
+        // Constraint operates on the effective source (the overlap).
+        // Feed the overlap dimensions through the constraint, then
+        // scale the viewport proportionally.
+        let mut builder = c.clone();
+        if let Some(sc) = &source_crop {
+            builder = builder.source_crop(SourceCrop::Pixels(*sc));
+        }
+        let mut constrained = builder.compute(source_w, source_h)?;
+
+        if !is_pure_crop {
+            // Scale the viewport padding proportionally with the constraint.
+            let scale_x = constrained.resize_to.width as f64 / overlap_w as f64;
+            let scale_y = constrained.resize_to.height as f64 / overlap_h as f64;
+
+            let new_canvas_w = (vw as f64 * scale_x).round().max(1.0) as u32;
+            let new_canvas_h = (vh as f64 * scale_y).round().max(1.0) as u32;
+            let new_place_x = (place_x as f64 * scale_x).round() as u32;
+            let new_place_y = (place_y as f64 * scale_y).round() as u32;
+
+            constrained.canvas = Size::new(new_canvas_w, new_canvas_h);
+            constrained.placement = (new_place_x, new_place_y);
+            constrained.canvas_color = reg.color;
+        }
+
+        Ok(constrained)
+    } else {
+        Ok(Layout {
+            source: Size::new(source_w, source_h),
+            source_crop,
+            resize_to: Size::new(overlap_w, overlap_h),
+            canvas: Size::new(vw, vh),
+            placement: (place_x, place_y),
+            canvas_color: reg.color,
+        })
+    }
 }
 
 /// Finalize layout after decoder reports what it actually did.
@@ -3949,5 +4253,326 @@ mod tests {
         assert_eq!(ideal.layout.canvas, Size::new(16, 16));
         // resize_to clamped to canvas
         assert_eq!(ideal.layout.resize_to, Size::new(3, 3));
+    }
+
+    // ── RegionCoord ────────────────────────────────────────────────────
+
+    #[test]
+    fn region_coord_px() {
+        let c = RegionCoord::px(100);
+        assert_eq!(c.resolve(1000), 100);
+    }
+
+    #[test]
+    fn region_coord_px_negative() {
+        let c = RegionCoord::px(-50);
+        assert_eq!(c.resolve(1000), -50);
+    }
+
+    #[test]
+    fn region_coord_pct() {
+        let c = RegionCoord::pct(0.5);
+        assert_eq!(c.resolve(1000), 500);
+    }
+
+    #[test]
+    fn region_coord_pct_px() {
+        let c = RegionCoord::pct_px(1.0, 50);
+        assert_eq!(c.resolve(1000), 1050);
+    }
+
+    #[test]
+    fn region_coord_pct_px_negative() {
+        let c = RegionCoord::pct_px(0.0, -100);
+        assert_eq!(c.resolve(500), -100);
+    }
+
+    // ── Region: pure crop ──────────────────────────────────────────────
+
+    #[test]
+    fn region_pure_crop() {
+        // Viewport inside source: pure crop
+        let (ideal, _) = Pipeline::new(800, 600)
+            .region(Region::crop(100, 50, 500, 350))
+            .plan()
+            .unwrap();
+        // Viewport is 400×300
+        assert_eq!(ideal.layout.canvas, Size::new(400, 300));
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 300));
+        assert_eq!(ideal.layout.placement, (0, 0));
+        // Source crop should be set
+        assert!(ideal.layout.source_crop.is_some());
+        let crop = ideal.layout.source_crop.unwrap();
+        assert_eq!(crop, Rect::new(100, 50, 400, 300));
+    }
+
+    #[test]
+    fn region_full_source() {
+        // Viewport exactly matches source: no crop, no pad
+        let (ideal, _) = Pipeline::new(800, 600)
+            .region(Region::crop(0, 0, 800, 600))
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(800, 600));
+        assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
+        assert!(ideal.layout.source_crop.is_none());
+        assert_eq!(ideal.layout.placement, (0, 0));
+    }
+
+    // ── Region: pure padding ───────────────────────────────────────────
+
+    #[test]
+    fn region_pure_padding() {
+        // Viewport extends beyond source on all sides
+        let (ideal, _) = Pipeline::new(800, 600)
+            .region(Region::padded(50, CanvasColor::white()))
+            .plan()
+            .unwrap();
+        // Canvas = source + 2*50 on each side
+        assert_eq!(ideal.layout.canvas, Size::new(900, 700));
+        // Content is the full source
+        assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
+        // Source content placed at (50, 50)
+        assert_eq!(ideal.layout.placement, (50, 50));
+        // No crop needed (full source visible)
+        assert!(ideal.layout.source_crop.is_none());
+    }
+
+    // ── Region: mixed crop + pad ───────────────────────────────────────
+
+    #[test]
+    fn region_mixed_crop_pad() {
+        // Viewport extends left and crops right:
+        // left=-50, top=0, right=600, bottom=600
+        // On 800×600 source:
+        //   overlap: [0,800) ∩ [-50,600) = [0,600), [0,600) ∩ [0,600) = [0,600)
+        //   So overlap x=[0..600), y=[0..600)
+        //   viewport width = 650, height = 600
+        //   place_x = 0 - (-50) = 50, place_y = 0
+        let (ideal, _) = Pipeline::new(800, 600)
+            .region_viewport(-50, 0, 600, 600, CanvasColor::black())
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(650, 600));
+        assert_eq!(ideal.layout.resize_to, Size::new(600, 600));
+        assert_eq!(ideal.layout.placement, (50, 0));
+        let crop = ideal.layout.source_crop.unwrap();
+        assert_eq!(crop, Rect::new(0, 0, 600, 600));
+    }
+
+    // ── Region: blank canvas ───────────────────────────────────────────
+
+    #[test]
+    fn region_blank_canvas() {
+        let (ideal, _) = Pipeline::new(800, 600)
+            .region_blank(400, 300, CanvasColor::white())
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(400, 300));
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 300));
+        // No source crop (blank canvas, no overlap)
+        assert!(ideal.layout.source_crop.is_none());
+    }
+
+    // ── Region + constraint ────────────────────────────────────────────
+
+    #[test]
+    fn region_crop_with_constraint() {
+        // Region crops to 400×300, then Fit to 200×150
+        let (ideal, _) = Pipeline::new(800, 600)
+            .region(Region::crop(100, 50, 500, 350))
+            .fit(200, 150)
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.resize_to, Size::new(200, 150));
+        assert_eq!(ideal.layout.canvas, Size::new(200, 150));
+    }
+
+    #[test]
+    fn region_pad_with_constraint() {
+        // Region pads 50px around 800×600 source → viewport 900×700
+        // Then Fit to 450×350: source 800×600 fits as 450×337
+        // Scale factor = 450/800 = 0.5625
+        // Canvas = 900 * 0.5625 × 700 * 0.5625 = 506×394 (approx)
+        // Placement = 50 * 0.5625 × 50 * 0.5625 = 28×28
+        let (ideal, _) = Pipeline::new(800, 600)
+            .region(Region::padded(50, CanvasColor::white()))
+            .fit(450, 350)
+            .plan()
+            .unwrap();
+        // The constraint operates on the 800×600 overlap, fitting to 450×350
+        // → fit 800×600 into 450×350 → 450×338 (4:3 → 450×337.5→338)
+        assert_eq!(ideal.layout.resize_to, Size::new(450, 338));
+        // Canvas scales proportionally
+        let expected_canvas_w = (900.0_f64 * 450.0 / 800.0).round() as u32;
+        let expected_canvas_h = (700.0_f64 * 338.0 / 600.0).round() as u32;
+        assert_eq!(ideal.layout.canvas.width, expected_canvas_w);
+        assert_eq!(ideal.layout.canvas.height, expected_canvas_h);
+    }
+
+    // ── Region with percentages ────────────────────────────────────────
+
+    #[test]
+    fn region_percentage_coords() {
+        // 10% crop from each edge on 1000×500
+        let reg = Region {
+            left: RegionCoord::pct(0.1),
+            top: RegionCoord::pct(0.1),
+            right: RegionCoord::pct(0.9),
+            bottom: RegionCoord::pct(0.9),
+            color: CanvasColor::Transparent,
+        };
+        let (ideal, _) = Pipeline::new(1000, 500).region(reg).plan().unwrap();
+        // 10% of 1000 = 100, 10% of 500 = 50
+        // Viewport: 100..900 × 50..450 = 800×400
+        assert_eq!(ideal.layout.canvas, Size::new(800, 400));
+        assert_eq!(ideal.layout.resize_to, Size::new(800, 400));
+        let crop = ideal.layout.source_crop.unwrap();
+        assert_eq!(crop, Rect::new(100, 50, 800, 400));
+    }
+
+    // ── Region with pct_px ─────────────────────────────────────────────
+
+    #[test]
+    fn region_pct_px_coords() {
+        // right = 100% + 20px, bottom = 100% + 20px (20px padding on right/bottom)
+        let reg = Region {
+            left: RegionCoord::px(0),
+            top: RegionCoord::px(0),
+            right: RegionCoord::pct_px(1.0, 20),
+            bottom: RegionCoord::pct_px(1.0, 20),
+            color: CanvasColor::black(),
+        };
+        let (ideal, _) = Pipeline::new(400, 300).region(reg).plan().unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(420, 320));
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 300));
+        assert_eq!(ideal.layout.placement, (0, 0));
+    }
+
+    // ── Region + limits ────────────────────────────────────────────────
+
+    #[test]
+    fn region_with_max_limits() {
+        // Region pads to 1000×800, limit max to 500×400
+        let (ideal, _) = Pipeline::new(800, 600)
+            .region(Region::padded(100, CanvasColor::white()))
+            .output_limits(OutputLimits {
+                max: Some(Size::new(500, 400)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        // Canvas should be within 500×400
+        assert!(ideal.layout.canvas.width <= 500);
+        assert!(ideal.layout.canvas.height <= 400);
+    }
+
+    // ── Region mutually exclusive with Crop ─────────────────────────
+
+    #[test]
+    fn region_first_wins_over_crop() {
+        // Region set first, crop ignored
+        let commands = [
+            Command::Region(Region::crop(0, 0, 400, 300)),
+            Command::Crop(SourceCrop::pixels(100, 100, 200, 200)),
+        ];
+        let (ideal, _) = compute_layout(&commands, 800, 600, None).unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(400, 300));
+    }
+
+    #[test]
+    fn crop_first_wins_over_region() {
+        // Crop set first, region ignored
+        let commands = [
+            Command::Crop(SourceCrop::pixels(100, 100, 200, 200)),
+            Command::Region(Region::crop(0, 0, 800, 600)),
+        ];
+        let (ideal, _) = compute_layout(&commands, 800, 600, None).unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(200, 200));
+    }
+
+    // ── SourceCrop::to_region equivalence ──────────────────────────────
+
+    #[test]
+    fn source_crop_to_region_pixels() {
+        let crop = SourceCrop::pixels(100, 50, 400, 300);
+        let region = crop.to_region();
+        // Region from crop should produce same layout as crop directly
+        let (crop_layout, _) = Pipeline::new(800, 600)
+            .crop(crop)
+            .plan()
+            .unwrap();
+        let (region_layout, _) = Pipeline::new(800, 600)
+            .region(region)
+            .plan()
+            .unwrap();
+        assert_eq!(crop_layout.layout.canvas, region_layout.layout.canvas);
+        assert_eq!(crop_layout.layout.resize_to, region_layout.layout.resize_to);
+        assert_eq!(crop_layout.layout.source_crop, region_layout.layout.source_crop);
+    }
+
+    #[test]
+    fn source_crop_to_region_percent() {
+        let crop = SourceCrop::percent(0.1, 0.1, 0.8, 0.8);
+        let region = crop.to_region();
+        let (crop_layout, _) = Pipeline::new(1000, 500)
+            .crop(crop)
+            .plan()
+            .unwrap();
+        let (region_layout, _) = Pipeline::new(1000, 500)
+            .region(region)
+            .plan()
+            .unwrap();
+        assert_eq!(crop_layout.layout.canvas, region_layout.layout.canvas);
+        assert_eq!(crop_layout.layout.resize_to, region_layout.layout.resize_to);
+    }
+
+    // ── Region zero dimension rejected ─────────────────────────────────
+
+    #[test]
+    fn region_zero_width_rejected() {
+        let result = Pipeline::new(800, 600)
+            .region(Region::crop(100, 0, 100, 600))
+            .plan();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn region_negative_dimension_rejected() {
+        let result = Pipeline::new(800, 600)
+            .region(Region::crop(500, 0, 100, 600))
+            .plan();
+        assert!(result.is_err());
+    }
+
+    // ── Pipeline region convenience methods ─────────────────────────────
+
+    #[test]
+    fn pipeline_region_viewport() {
+        let (ideal, _) = Pipeline::new(800, 600)
+            .region_viewport(100, 100, 700, 500, CanvasColor::Transparent)
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(600, 400));
+    }
+
+    #[test]
+    fn pipeline_region_pad() {
+        let (ideal, _) = Pipeline::new(800, 600)
+            .region_pad(30, CanvasColor::white())
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(860, 660));
+        assert_eq!(ideal.layout.placement, (30, 30));
+    }
+
+    #[test]
+    fn pipeline_region_blank() {
+        let (ideal, _) = Pipeline::new(800, 600)
+            .region_blank(200, 100, CanvasColor::black())
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(200, 100));
+        assert!(ideal.layout.source_crop.is_none());
     }
 }
