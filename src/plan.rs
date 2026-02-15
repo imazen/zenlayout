@@ -1316,8 +1316,29 @@ pub fn compute_layout_sequential(
                 saw_constrain = true;
                 post_ops.clear(); // reset post-ops on each new constrain
             }
-            Command::Pad { .. } => {
-                post_ops.push(cmd);
+            Command::Pad {
+                top,
+                right,
+                bottom,
+                left,
+                color,
+            } => {
+                if saw_constrain || !pre_regions.is_empty() {
+                    // Post-constrain pad, or pad after a prior crop/region:
+                    // add fill around the existing result (don't recover
+                    // source pixels that a prior crop removed).
+                    post_ops.push(cmd);
+                } else {
+                    // Pad as the first viewport command: convert to Region
+                    // so it composes with subsequent crop/region commands.
+                    pre_regions.push(Region {
+                        left: RegionCoord::px(-(*left as i32)),
+                        top: RegionCoord::px(-(*top as i32)),
+                        right: RegionCoord::pct_px(1.0, *right as i32),
+                        bottom: RegionCoord::pct_px(1.0, *bottom as i32),
+                        color: *color,
+                    });
+                }
             }
         }
     }
