@@ -35,26 +35,30 @@ let plan = ideal.finalize(&request, &offer);
 
 ## Processing pipeline
 
-The pipeline processes commands in a fixed order, regardless of the order they appear in the command list. First matching command wins for each slot (crop/region, constrain, pad).
+The pipeline processes commands in a fixed order, regardless of the order they appear in the command list. Each slot (crop/region, constrain, pad) accepts the **first** matching command; duplicates are silently ignored.
 
 ```text
 Pipeline processing order (fixed mode)
 ══════════════════════════════════════
 
-1. ORIENT — All orientation commands (auto_orient, rotate, flip) fuse into
-   a single net orientation via D4 group composition. Source dimensions
-   transform to post-orientation space.
+1. ORIENT — All orientation commands (auto_orient, rotate, flip) compose
+   into a single source transform via D4 group algebra. This happens
+   regardless of where they appear — there is no "post-resize flip."
+   Source dimensions transform to post-orientation space.
 
-   Multiple rotations/flips compose algebraically:
      .auto_orient(6).rotate_90() = Rotate90 ∘ Rotate90 = Rotate180
+     .fit(800, 600).flip_h()     = flip source, then fit (not "fit then flip")
 
-2. REGION or CROP — Define the effective source. First one wins.
-   - Crop: select a rectangle within the source
-   - Region: viewport into infinite canvas (can crop, pad, or both)
+2. REGION or CROP — Define the effective source. First one wins; if you
+   set both a crop and a region, the second is silently ignored.
+   - Crop: select a rectangle within the source (origin + size)
+   - Region: viewport into infinite canvas (edge coords; can crop, pad, or both)
    Crop converts to Region internally.
 
 3. CONSTRAIN — Resize the effective source to target dimensions. First one
    wins. The 8 constraint modes control aspect ratio handling.
+   - Fit/FitCrop/FitPad/Distort will upscale small images
+   - Within/WithinCrop/WithinPad will not
    - Single-axis constraints derive the missing dimension from aspect ratio
 
 4. PAD — Add explicit padding around the constrained result. First one wins.
@@ -69,7 +73,7 @@ Pipeline processing order (fixed mode)
    Max always wins over min.
 ```
 
-**Sequential mode** (`plan_sequential()` / `compute_layout_sequential()`): same operations, but commands execute in order. Orient still fuses. Multiple crop/region compose (each refines the previous). Last constrain wins. Post-constrain crop/pad adjusts the output canvas.
+**Sequential mode** (`plan_sequential()` / `compute_layout_sequential()`): same operations, but commands execute in order. Orient still fuses into a source transform. Multiple crop/region compose (each refines the previous). **Last** constrain wins (opposite of fixed mode). Post-constrain crop/pad adjusts the output canvas.
 
 ## Two-phase layout
 
@@ -102,17 +106,17 @@ If your decoder doesn't support any of that, pass `DecoderOffer::full_decode(w, 
 
 ## Constraint modes
 
-Eight modes control how source dimensions map to target dimensions:
+Eight modes control how source dimensions map to target dimensions. The `Fit*` variants will upscale small images; the `Within*` variants never upscale:
 
 | Mode | Behavior | Aspect ratio | May upscale |
 |------|----------|-------------|-------------|
-| `Fit` | Scale to fit within target | Preserved | Yes |
+| `Fit` | Scale to fit within target | Preserved | **Yes** |
 | `Within` | Like Fit, but never upscales | Preserved | No |
-| `FitCrop` | Scale to fill target, crop overflow | Preserved | Yes |
+| `FitCrop` | Scale to fill target, crop overflow | Preserved | **Yes** |
 | `WithinCrop` | Like FitCrop, but never upscales | Preserved | No |
-| `FitPad` | Scale to fit, pad to exact target | Preserved | Yes |
+| `FitPad` | Scale to fit, pad to exact target | Preserved | **Yes** |
 | `WithinPad` | Like FitPad, but never upscales | Preserved | No |
-| `Distort` | Scale to exact target dimensions | Stretched | Yes |
+| `Distort` | Scale to exact target dimensions | Stretched | **Yes** |
 | `AspectCrop` | Crop to target aspect ratio, no scaling | Preserved | No |
 
 ```text
@@ -166,8 +170,10 @@ assert_eq!(combined, Orientation::Transpose);   // EXIF 5
 assert_eq!(exif6.compose(exif6.inverse()), Orientation::Identity);
 ```
 
-Multiple orientation commands in a pipeline fuse into a single net orientation:
+**All orientation commands fuse into a single source transform**, regardless of where they appear in the pipeline. There is no "post-resize flip" — orientation is always applied to the source. In sequential mode, if an axis-swapping orientation (Rotate90/270, Transpose, Transverse) appears after a constraint, the constraint's target dimensions are swapped to compensate, producing correct output geometry.
+
 - `.auto_orient(6).rotate_90()` = `Rotate90.compose(Rotate90)` = `Rotate180`
+- `.fit(800, 600).flip_h()` flips the source, then fits — not "fit, then flip"
 - Order matters: `a.compose(b)` = apply `a` first, then `b`
 
 ## Region
@@ -178,7 +184,9 @@ Multiple orientation commands in a pipeline fuse into a single net orientation:
 - Viewport extending beyond source → pad (filled with `color`)
 - Viewport entirely outside source → blank canvas
 
-Coordinates are expressed as `RegionCoord`: a percentage of source dimension plus a pixel offset. This allows expressions like "10% from the left edge" or "50 pixels past the right edge".
+Coordinates use **edge positions** (left, top, right, bottom), not origin + size. `Region::crop(10, 10, 90, 90)` selects an 80×80 area. This differs from `SourceCrop::pixels(10, 10, 80, 80)` which uses origin + size for the same region.
+
+Each edge is a `RegionCoord`: a percentage of source dimension plus a pixel offset. This allows expressions like "10% from the left edge" or "50 pixels past the right edge".
 
 ```rust
 use zenlayout::{Pipeline, Region, RegionCoord, CanvasColor};
@@ -241,11 +249,13 @@ let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
 ```
 
 Sequential mode differences from fixed mode:
-- **Orient**: still fuses (composes algebraically) regardless of position
+- **Orient**: still fuses into a single source transform regardless of position
 - **Crop/Region**: compose sequentially (second crop refines the first)
-- **Constrain**: last one wins (not first)
+- **Constrain**: **last** one wins (opposite of fixed mode's first-wins)
 - **Post-constrain crop/pad**: adjusts the output canvas, not the source
 - **Limits**: applied once at the end (same as fixed)
+
+Both modes still produce a single `Layout` — one crop, one resize, one canvas. "Sequential" refers to the command evaluation order, not multi-pass pixel processing.
 
 ## Padding
 
@@ -325,7 +335,7 @@ Canvas background color for pad modes.
 
 | Variant | Description |
 |---------|-------------|
-| `Transparent` | Transparent black `[0, 0, 0, 0]` (default) |
+| `Transparent` | Transparent black `[0, 0, 0, 0]` — premultiplied convention (default) |
 | `Srgb { r: u8, g: u8, b: u8, a: u8 }` | sRGB color with alpha |
 | `Linear { r: f32, g: f32, b: f32, a: f32 }` | Linear RGB color with alpha |
 
@@ -338,11 +348,11 @@ Derives: `Copy`, `Clone`, `Debug`, `Default` (`Transparent`), `PartialEq`, `Eq`,
 
 ### `SourceCrop`
 
-Region of source image to use before applying the constraint.
+Region of source image to use before applying the constraint. Uses **origin + size** coordinates (`x, y, width, height`), unlike `Region` which uses edge coordinates (`left, top, right, bottom`).
 
 | Variant | Description |
 |---------|-------------|
-| `Pixels(Rect)` | Absolute pixel coordinates |
+| `Pixels(Rect)` | Absolute pixel coordinates (origin + size) |
 | `Percent { x: f32, y: f32, width: f32, height: f32 }` | Percentage of source dimensions (all `0.0..=1.0`) |
 
 | Method | Signature | Description |
@@ -380,7 +390,7 @@ Derives: `Copy`, `Clone`, `Debug`, `PartialEq`
 
 ### `Region`
 
-A viewport rectangle in source coordinates. Unifies crop and pad.
+A viewport rectangle in source coordinates. Unifies crop and pad. Uses **edge coordinates** (left, top, right, bottom), not origin + size. `Region::crop(10, 10, 90, 90)` = 80×80 pixels.
 
 ```rust
 pub struct Region {
@@ -394,7 +404,7 @@ pub struct Region {
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `crop` | `const fn crop(left: i32, top: i32, right: i32, bottom: i32) -> Self` | Viewport from pixel edges (transparent fill) |
+| `crop` | `const fn crop(left: i32, top: i32, right: i32, bottom: i32) -> Self` | Viewport from edge coords (transparent fill) |
 | `padded` | `const fn padded(amount: u32, color: CanvasColor) -> Self` | Uniform padding around full source |
 | `blank` | `const fn blank(width: u32, height: u32, color: CanvasColor) -> Self` | Blank canvas (no source content) |
 
@@ -454,7 +464,7 @@ pub struct Layout {
     pub source_crop: Option<Rect>,       // Region of source to use (None = full)
     pub resize_to: Size,                 // Dimensions to resize cropped source to
     pub canvas: Size,                    // Final output canvas (>= resize_to)
-    pub placement: (u32, u32),           // Top-left offset of image on canvas
+    pub placement: (i32, i32),           // Offset of image on canvas
     pub canvas_color: CanvasColor,       // Background color for padding areas
 }
 ```
@@ -489,17 +499,17 @@ Builder for image processing pipelines. All operations are in post-orientation c
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `new` | `fn new(source_w: u32, source_h: u32) -> Self` | Create pipeline for source image |
-| `auto_orient` | `fn auto_orient(self, exif: u8) -> Self` | Apply EXIF orientation (1-8). Invalid values ignored. |
-| `rotate_90` | `fn rotate_90(self) -> Self` | Rotate 90 deg CW. Stacks with other orientations. |
-| `rotate_180` | `fn rotate_180(self) -> Self` | Rotate 180 deg. Stacks. |
-| `rotate_270` | `fn rotate_270(self) -> Self` | Rotate 270 deg CW. Stacks. |
-| `flip_h` | `fn flip_h(self) -> Self` | Flip horizontally. Stacks. |
-| `flip_v` | `fn flip_v(self) -> Self` | Flip vertically. Stacks. |
-| `crop_pixels` | `fn crop_pixels(self, x: u32, y: u32, width: u32, height: u32) -> Self` | Crop to pixel coords (first wins) |
+| `auto_orient` | `fn auto_orient(self, exif: u8) -> Self` | Apply EXIF orientation (1-8). Composes into source transform. |
+| `rotate_90` | `fn rotate_90(self) -> Self` | Rotate 90 deg CW. Composes into source transform. |
+| `rotate_180` | `fn rotate_180(self) -> Self` | Rotate 180 deg. Composes into source transform. |
+| `rotate_270` | `fn rotate_270(self) -> Self` | Rotate 270 deg CW. Composes into source transform. |
+| `flip_h` | `fn flip_h(self) -> Self` | Flip horizontally. Composes into source transform. |
+| `flip_v` | `fn flip_v(self) -> Self` | Flip vertically. Composes into source transform. |
+| `crop_pixels` | `fn crop_pixels(self, x: u32, y: u32, width: u32, height: u32) -> Self` | Crop to pixel coords, origin + size (first wins) |
 | `crop_percent` | `fn crop_percent(self, x: f32, y: f32, width: f32, height: f32) -> Self` | Crop using percentages (first wins) |
 | `crop` | `fn crop(self, source_crop: SourceCrop) -> Self` | Crop with pre-built `SourceCrop` (first wins) |
 | `region` | `fn region(self, region: Region) -> Self` | Set viewport region (first crop/region wins) |
-| `region_viewport` | `fn region_viewport(self, left: i32, top: i32, right: i32, bottom: i32, color: CanvasColor) -> Self` | Viewport from pixel edges |
+| `region_viewport` | `fn region_viewport(self, left: i32, top: i32, right: i32, bottom: i32, color: CanvasColor) -> Self` | Viewport from edge coords (not origin + size) |
 | `region_pad` | `fn region_pad(self, amount: u32, color: CanvasColor) -> Self` | Uniform padding via region |
 | `region_blank` | `fn region_blank(self, width: u32, height: u32, color: CanvasColor) -> Self` | Blank canvas (no source content) |
 | `fit` | `fn fit(self, width: u32, height: u32) -> Self` | Fit within target (may upscale) |
@@ -525,9 +535,9 @@ Individual processing command for programmatic construction (alternative to `Pip
 
 | Variant | Fields | Description |
 |---------|--------|-------------|
-| `AutoOrient(u8)` | EXIF value (1-8) | Apply EXIF orientation correction |
-| `Rotate(Rotation)` | | Manual rotation |
-| `Flip(FlipAxis)` | | Manual flip |
+| `AutoOrient(u8)` | EXIF value (1-8) | Apply EXIF orientation. Composes into source transform. |
+| `Rotate(Rotation)` | | Manual rotation. Composes into source transform. |
+| `Flip(FlipAxis)` | | Manual flip. Composes into source transform. |
 | `Crop(SourceCrop)` | | Crop in post-orientation coordinates |
 | `Region(Region)` | | Viewport region in post-orientation coordinates |
 | `Constrain` | `{ constraint: Constraint }` | Constrain dimensions |
@@ -724,7 +734,7 @@ How to align output dimensions to codec-required multiples.
 | Variant | Description |
 |---------|-------------|
 | `Crop(u32, u32)` | Round canvas down per axis. Loses up to `n-1` edge pixels. |
-| `Extend(u32, u32)` | Round canvas up per axis. No content loss. Renderer replicates edges. |
+| `Extend(u32, u32)` | Round canvas up per axis. Resets placement to `(0, 0)`. No content loss. Renderer replicates edges. |
 | `Distort(u32, u32)` | Round to nearest multiple per axis. Minimal stretch. |
 
 | Method | Signature | Description |

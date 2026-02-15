@@ -106,6 +106,11 @@ impl RegionCoord {
 /// - Viewport smaller than source → crop
 /// - Viewport extending beyond source → pad
 /// - Viewport entirely outside source → blank canvas
+///
+/// Coordinates are **edge-based** (left, top, right, bottom), not origin + size.
+/// A viewport from `(10, 10, 90, 90)` is 80×80 pixels. This differs from
+/// [`SourceCrop::pixels`](crate::SourceCrop::pixels) which uses origin + size:
+/// `(10, 10, 80, 80)` for the same region.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Region {
     /// Left edge of viewport in source x-coordinates.
@@ -121,7 +126,9 @@ pub struct Region {
 }
 
 impl Region {
-    /// Viewport from pixel edges (transparent fill).
+    /// Viewport from pixel edge coordinates (transparent fill).
+    ///
+    /// `Region::crop(10, 10, 90, 90)` selects an 80×80 region.
     pub const fn crop(left: i32, top: i32, right: i32, bottom: i32) -> Self {
         Self {
             left: RegionCoord::px(left),
@@ -145,16 +152,19 @@ impl Region {
 
     /// Blank canvas (viewport entirely outside source).
     ///
-    /// Creates a viewport at a large negative offset with the given dimensions,
-    /// so it doesn't overlap the source at all.
+    /// Creates a viewport in negative coordinate space with the given
+    /// dimensions, guaranteeing zero overlap with the source image.
     pub const fn blank(width: u32, height: u32, color: CanvasColor) -> Self {
-        // Place viewport far from source so there's no overlap
-        let offset = -1_000_000i32;
+        // Place viewport so right edge = -1, bottom edge = -1.
+        // Source occupies [0, source_w) × [0, source_h), so a viewport
+        // ending at -1 can never overlap regardless of source dimensions.
+        let w = width as i32;
+        let h = height as i32;
         Self {
-            left: RegionCoord::px(offset),
-            top: RegionCoord::px(offset),
-            right: RegionCoord::px(offset + width as i32),
-            bottom: RegionCoord::px(offset + height as i32),
+            left: RegionCoord::px(-w - 1),
+            top: RegionCoord::px(-h - 1),
+            right: RegionCoord::px(-1),
+            bottom: RegionCoord::px(-1),
             color,
         }
     }
@@ -203,9 +213,11 @@ impl SourceCrop {
 pub enum Command {
     /// Apply EXIF orientation correction (value 1-8).
     AutoOrient(u8),
-    /// Manual rotation, stacks with EXIF.
+    /// Manual rotation. Composes with all orientation commands into
+    /// a single source transform.
     Rotate(Rotation),
-    /// Manual flip, stacks with other orientation commands.
+    /// Manual flip. Composes with all orientation commands into
+    /// a single source transform.
     Flip(FlipAxis),
     /// Crop in post-orientation coordinates.
     Crop(SourceCrop),
@@ -336,9 +348,10 @@ pub enum Align {
     /// Round canvas down to nearest multiple per axis. Loses up to `n-1`
     /// edge pixels per axis. Simple, lossy.
     Crop(u32, u32),
-    /// Extend canvas up to nearest multiple per axis. Image at `(0, 0)`,
-    /// renderer replicates edge pixels into extension area. Original content
-    /// dimensions stored in [`IdealLayout::content_size`] / [`LayoutPlan::content_size`].
+    /// Extend canvas up to nearest multiple per axis. **Resets placement
+    /// to `(0, 0)`** — renderer replicates edge pixels into the extension
+    /// area at the bottom-right. Original content dimensions stored in
+    /// [`IdealLayout::content_size`] / [`LayoutPlan::content_size`].
     /// No content loss. This is how JPEG MCU padding works.
     Extend(u32, u32),
     /// Round `resize_to` to nearest multiple per axis, stretching content
@@ -765,6 +778,10 @@ impl Pipeline {
     }
 
     /// Apply EXIF orientation correction (value 1-8). Invalid values are ignored.
+    ///
+    /// Orientation commands always compose algebraically into a single source
+    /// transform, regardless of position in the pipeline. There is no
+    /// "post-resize flip" — orientation is always applied to the source.
     pub fn auto_orient(mut self, exif: u8) -> Self {
         if let Some(o) = Orientation::from_exif(exif) {
             self.orientation = self.orientation.compose(o);
@@ -773,35 +790,40 @@ impl Pipeline {
         self
     }
 
-    /// Rotate 90 degrees clockwise. Stacks with EXIF and other rotations.
+    /// Rotate 90 degrees clockwise. Composes with all other orientation
+    /// commands into a single source transform (see [`auto_orient`](Self::auto_orient)).
     pub fn rotate_90(mut self) -> Self {
         self.orientation = self.orientation.compose(Orientation::Rotate90);
         self.commands.push(Command::Rotate(Rotation::Rotate90));
         self
     }
 
-    /// Rotate 180 degrees. Stacks with EXIF and other rotations.
+    /// Rotate 180 degrees. Composes with all other orientation commands
+    /// into a single source transform (see [`auto_orient`](Self::auto_orient)).
     pub fn rotate_180(mut self) -> Self {
         self.orientation = self.orientation.compose(Orientation::Rotate180);
         self.commands.push(Command::Rotate(Rotation::Rotate180));
         self
     }
 
-    /// Rotate 270 degrees clockwise. Stacks with EXIF and other rotations.
+    /// Rotate 270 degrees clockwise. Composes with all other orientation
+    /// commands into a single source transform (see [`auto_orient`](Self::auto_orient)).
     pub fn rotate_270(mut self) -> Self {
         self.orientation = self.orientation.compose(Orientation::Rotate270);
         self.commands.push(Command::Rotate(Rotation::Rotate270));
         self
     }
 
-    /// Flip horizontally. Stacks with EXIF and other orientation commands.
+    /// Flip horizontally. Composes with all other orientation commands
+    /// into a single source transform (see [`auto_orient`](Self::auto_orient)).
     pub fn flip_h(mut self) -> Self {
         self.orientation = self.orientation.compose(Orientation::FlipH);
         self.commands.push(Command::Flip(FlipAxis::Horizontal));
         self
     }
 
-    /// Flip vertically. Stacks with EXIF and other orientation commands.
+    /// Flip vertically. Composes with all other orientation commands
+    /// into a single source transform (see [`auto_orient`](Self::auto_orient)).
     pub fn flip_v(mut self) -> Self {
         self.orientation = self.orientation.compose(Orientation::FlipV);
         self.commands.push(Command::Flip(FlipAxis::Vertical));
@@ -809,6 +831,12 @@ impl Pipeline {
     }
 
     /// Crop to pixel coordinates in post-orientation space.
+    ///
+    /// Uses origin + size: `(x, y)` is the top-left corner, `(width, height)`
+    /// is the crop region size. Compare with [`region_viewport`](Self::region_viewport)
+    /// which uses edge coordinates (left, top, right, bottom).
+    ///
+    /// In fixed mode, first crop/region wins; later ones are ignored.
     pub fn crop_pixels(mut self, x: u32, y: u32, width: u32, height: u32) -> Self {
         let sc = SourceCrop::pixels(x, y, width, height);
         self.commands.push(Command::Crop(sc));
@@ -819,6 +847,8 @@ impl Pipeline {
     }
 
     /// Crop using percentage coordinates (0.0–1.0) in post-orientation space.
+    ///
+    /// In fixed mode, first crop/region wins; later ones are ignored.
     pub fn crop_percent(mut self, x: f32, y: f32, width: f32, height: f32) -> Self {
         let sc = SourceCrop::percent(x, y, width, height);
         self.commands.push(Command::Crop(sc));
@@ -829,6 +859,8 @@ impl Pipeline {
     }
 
     /// Crop with a pre-built [`SourceCrop`].
+    ///
+    /// In fixed mode, first crop/region wins; later ones are ignored.
     pub fn crop(mut self, source_crop: SourceCrop) -> Self {
         self.commands.push(Command::Crop(source_crop));
         if self.crop.is_none() {
@@ -839,8 +871,7 @@ impl Pipeline {
 
     /// Define a viewport region in source coordinates (post-orientation).
     ///
-    /// Occupies the crop/region slot (first one wins in fixed mode).
-    /// If a crop was already set, this is ignored.
+    /// In fixed mode, first crop/region wins; later ones are ignored.
     pub fn region(mut self, region: Region) -> Self {
         self.commands.push(Command::Region(region));
         if self.crop.is_none() && self.region.is_none() {
@@ -849,7 +880,12 @@ impl Pipeline {
         self
     }
 
-    /// Convenience: viewport from pixel edges.
+    /// Define a viewport from pixel edge coordinates (left, top, right, bottom).
+    ///
+    /// Uses edge coordinates, not origin + size. A viewport from
+    /// `(10, 10, 90, 90)` is 80x80 pixels. Compare with
+    /// [`crop_pixels`](Self::crop_pixels) which uses origin + size:
+    /// `(10, 10, 80, 80)` for the same region.
     pub fn region_viewport(
         self,
         left: i32,
@@ -877,47 +913,72 @@ impl Pipeline {
         self.region(Region::blank(width, height, color))
     }
 
-    /// Fit within target dimensions, preserving aspect ratio. May upscale.
+    /// Fit within target dimensions, preserving aspect ratio.
+    /// **Will upscale** small images to fill the target. Use
+    /// [`within`](Self::within) to prevent upscaling.
+    ///
+    /// In fixed mode, first constraint wins; later ones are ignored.
     pub fn fit(self, width: u32, height: u32) -> Self {
         self.constrain(Constraint::new(ConstraintMode::Fit, width, height))
     }
 
-    /// Fit within target dimensions, never upscaling.
+    /// Fit within target dimensions, never upscaling. Images smaller than
+    /// the target stay at their original size.
+    ///
+    /// In fixed mode, first constraint wins; later ones are ignored.
     pub fn within(self, width: u32, height: u32) -> Self {
         self.constrain(Constraint::new(ConstraintMode::Within, width, height))
     }
 
     /// Scale to fill target, cropping overflow. Preserves aspect ratio.
+    /// Output is exactly `width × height`. May upscale.
+    ///
+    /// In fixed mode, first constraint wins; later ones are ignored.
     pub fn fit_crop(self, width: u32, height: u32) -> Self {
         self.constrain(Constraint::new(ConstraintMode::FitCrop, width, height))
     }
 
     /// Like [`fit_crop`](Self::fit_crop), but never upscales.
+    ///
+    /// In fixed mode, first constraint wins; later ones are ignored.
     pub fn within_crop(self, width: u32, height: u32) -> Self {
         self.constrain(Constraint::new(ConstraintMode::WithinCrop, width, height))
     }
 
-    /// Fit within target, padding to exact target dimensions.
+    /// Fit within target, padding to exact target dimensions. May upscale.
+    ///
+    /// In fixed mode, first constraint wins; later ones are ignored.
     pub fn fit_pad(self, width: u32, height: u32) -> Self {
         self.constrain(Constraint::new(ConstraintMode::FitPad, width, height))
     }
 
     /// Like [`fit_pad`](Self::fit_pad), but never upscales.
+    ///
+    /// In fixed mode, first constraint wins; later ones are ignored.
     pub fn within_pad(self, width: u32, height: u32) -> Self {
         self.constrain(Constraint::new(ConstraintMode::WithinPad, width, height))
     }
 
     /// Scale to exact target dimensions, distorting aspect ratio.
+    ///
+    /// In fixed mode, first constraint wins; later ones are ignored.
     pub fn distort(self, width: u32, height: u32) -> Self {
         self.constrain(Constraint::new(ConstraintMode::Distort, width, height))
     }
 
     /// Crop to target aspect ratio without scaling.
+    ///
+    /// In fixed mode, first constraint wins; later ones are ignored.
     pub fn aspect_crop(self, width: u32, height: u32) -> Self {
         self.constrain(Constraint::new(ConstraintMode::AspectCrop, width, height))
     }
 
     /// Apply a pre-built [`Constraint`] for advanced cases (gravity, canvas color, single-axis).
+    ///
+    /// In fixed mode, first constraint wins; later ones are ignored.
+    ///
+    /// If the [`Constraint`] has its own [`source_crop`](Constraint::source_crop),
+    /// that crop composes with (nests inside) any pipeline-level crop or region.
     pub fn constrain(mut self, constraint: Constraint) -> Self {
         self.commands.push(Command::Constrain {
             constraint: constraint.clone(),
@@ -928,12 +989,18 @@ impl Pipeline {
         self
     }
 
-    /// Add uniform padding on all sides.
+    /// Add uniform padding on all sides. Values are absolute pixels; they
+    /// never collapse or merge (unlike CSS margins).
+    ///
+    /// In fixed mode, first pad wins; later ones are ignored.
     pub fn pad_uniform(self, amount: u32, color: CanvasColor) -> Self {
         self.pad(amount, amount, amount, amount, color)
     }
 
-    /// Add padding around the image.
+    /// Add padding around the image. Values are absolute pixels; they
+    /// never collapse or merge (unlike CSS margins).
+    ///
+    /// In fixed mode, first pad wins; later ones are ignored.
     pub fn pad(mut self, top: u32, right: u32, bottom: u32, left: u32, color: CanvasColor) -> Self {
         self.commands.push(Command::Pad {
             top,

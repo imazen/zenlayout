@@ -38,11 +38,11 @@ pub enum ConstraintMode {
     Distort,
 
     /// Scale to fit within target, preserving aspect ratio.
-    /// Upscales or downscales as needed.
+    /// **Will upscale** small images — use [`Within`](Self::Within) to prevent this.
     /// Output may be smaller than target on one axis.
     Fit,
 
-    /// Like [`Fit`](Self::Fit), but never upscales.
+    /// Like [`Fit`](Self::Fit), but **never upscales**.
     /// Images already smaller than target stay their original size.
     Within,
 
@@ -82,7 +82,8 @@ pub enum Gravity {
 /// during resize). Both carry alpha.
 #[derive(Copy, Clone, Debug, Default)]
 pub enum CanvasColor {
-    /// Transparent black `[0, 0, 0, 0]`.
+    /// Transparent black `[0, 0, 0, 0]` (premultiplied-alpha convention:
+    /// RGB channels are zero when alpha is zero).
     #[default]
     Transparent,
     /// sRGB color with alpha (8-bit per channel).
@@ -183,6 +184,10 @@ impl CanvasColor {
 /// Either absolute pixel coordinates or percentages of source dimensions.
 /// The caller resolves this — for JPEG, the decoder can skip IDCT outside
 /// the crop region; for raw pixels, it's sub-buffer addressing.
+///
+/// Pixel coordinates use **origin + size** convention: `(x, y, width, height)`.
+/// This differs from [`Region`](crate::Region) which uses edge coordinates
+/// `(left, top, right, bottom)`.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum SourceCrop {
     /// Absolute pixel coordinates.
@@ -410,9 +415,12 @@ impl Constraint {
 
     /// Set explicit source crop (pixel or percentage).
     ///
-    /// Applied before the constraint mode. For JPEG decode pipelines,
-    /// the caller can pass the resolved crop to the decoder to skip
-    /// IDCT outside the region.
+    /// Applied before the constraint mode. When used inside a
+    /// [`Pipeline`](crate::Pipeline), this crop composes with (nests inside)
+    /// any pipeline-level crop or region — it does not replace it.
+    ///
+    /// For JPEG decode pipelines, the caller can pass the resolved crop
+    /// to the decoder to skip IDCT outside the region.
     pub fn source_crop(mut self, crop: SourceCrop) -> Self {
         self.source_crop = Some(crop);
         self
