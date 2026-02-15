@@ -1275,11 +1275,17 @@ pub fn compute_layout_sequential(
     let mut post_ops: Vec<&Command> = Vec::new();
     let mut saw_constrain = false;
 
+    let mut post_orientation = Orientation::Identity;
+
     for cmd in commands {
         match cmd {
             Command::AutoOrient(exif) => {
                 if let Some(o) = Orientation::from_exif(*exif) {
-                    orientation = orientation.compose(o);
+                    if saw_constrain {
+                        post_orientation = post_orientation.compose(o);
+                    } else {
+                        orientation = orientation.compose(o);
+                    }
                 }
             }
             Command::Rotate(r) => {
@@ -1288,14 +1294,22 @@ pub fn compute_layout_sequential(
                     Rotation::Rotate180 => Orientation::Rotate180,
                     Rotation::Rotate270 => Orientation::Rotate270,
                 };
-                orientation = orientation.compose(o);
+                if saw_constrain {
+                    post_orientation = post_orientation.compose(o);
+                } else {
+                    orientation = orientation.compose(o);
+                }
             }
             Command::Flip(axis) => {
                 let o = match axis {
                     FlipAxis::Horizontal => Orientation::FlipH,
                     FlipAxis::Vertical => Orientation::FlipV,
                 };
-                orientation = orientation.compose(o);
+                if saw_constrain {
+                    post_orientation = post_orientation.compose(o);
+                } else {
+                    orientation = orientation.compose(o);
+                }
             }
             Command::Crop(sc) => {
                 if saw_constrain {
@@ -1312,6 +1326,10 @@ pub fn compute_layout_sequential(
                 }
             }
             Command::Constrain { constraint: c } => {
+                // Absorb any accumulated post_orientation into pre_orientation
+                // since a new constrain resets the post-constrain context.
+                orientation = orientation.compose(post_orientation);
+                post_orientation = Orientation::Identity;
                 constraint = Some(c); // last wins
                 saw_constrain = true;
                 post_ops.clear(); // reset post-ops on each new constrain
@@ -1324,13 +1342,8 @@ pub fn compute_layout_sequential(
                 color,
             } => {
                 if saw_constrain || !pre_regions.is_empty() {
-                    // Post-constrain pad, or pad after a prior crop/region:
-                    // add fill around the existing result (don't recover
-                    // source pixels that a prior crop removed).
                     post_ops.push(cmd);
                 } else {
-                    // Pad as the first viewport command: convert to Region
-                    // so it composes with subsequent crop/region commands.
                     pre_regions.push(Region {
                         left: RegionCoord::px(-(*left as i32)),
                         top: RegionCoord::px(-(*top as i32)),
@@ -1342,6 +1355,25 @@ pub fn compute_layout_sequential(
             }
         }
     }
+
+    // If post_orientation swaps axes, swap the constraint's target dimensions
+    // so the output matches: constrain→rotate90 = "resize then rotate."
+    let swapped_constraint;
+    if post_orientation.swaps_axes() {
+        if let Some(c) = constraint {
+            swapped_constraint = Constraint {
+                mode: c.mode,
+                width: c.height,
+                height: c.width,
+                gravity: c.gravity,
+                canvas_color: c.canvas_color,
+                source_crop: c.source_crop,
+            };
+            constraint = Some(&swapped_constraint);
+        }
+    }
+    // Fuse post-orientation into pre-orientation (for source transform).
+    orientation = orientation.compose(post_orientation);
 
     if source_w == 0 || source_h == 0 {
         return Err(LayoutError::ZeroSourceDimension);
@@ -1453,6 +1485,13 @@ pub fn compute_layout_sequential(
         None
     };
 
+    // Phase 4b: Apply post-constrain orientation to the layout.
+    // This transforms canvas, resize_to, and placement as if the output
+    // were rotated/flipped after resizing.
+    if !post_orientation.is_identity() {
+        apply_post_orientation(&mut layout, post_orientation);
+    }
+
     // Phase 5: Apply limits.
     let (layout, content_size) = if let Some(mc) = limits {
         mc.apply(layout)
@@ -1484,6 +1523,38 @@ pub fn compute_layout_sequential(
 
 /// Compose two regions: `outer` defines a viewport, `inner` is relative to
 /// that viewport's coordinate system. Result is in the original source coords.
+/// Apply a post-constrain orientation to the layout's output dimensions.
+///
+/// Transforms canvas, resize_to, and placement as if the entire output
+/// were rotated/flipped after resizing. This is used by sequential mode
+/// when orientation commands appear after a constrain.
+fn apply_post_orientation(layout: &mut Layout, orient: Orientation) {
+    let cw = layout.canvas.width;
+    let ch = layout.canvas.height;
+    let rw = layout.resize_to.width;
+    let rh = layout.resize_to.height;
+    let (px, py) = layout.placement;
+
+    if orient.swaps_axes() {
+        layout.canvas = Size::new(ch, cw);
+        layout.resize_to = Size::new(rh, rw);
+    }
+
+    // Transform placement: where does the content top-left end up?
+    // Content occupies [px, px+rw) × [py, py+rh) on the canvas.
+    // After orientation, the top-left corner of the content moves.
+    layout.placement = match orient {
+        Orientation::Identity => (px, py),
+        Orientation::FlipH => (cw as i32 - px - rw as i32, py),
+        Orientation::Rotate180 => (cw as i32 - px - rw as i32, ch as i32 - py - rh as i32),
+        Orientation::FlipV => (px, ch as i32 - py - rh as i32),
+        Orientation::Rotate90 => (ch as i32 - py - rh as i32, px),
+        Orientation::Transpose => (py, px),
+        Orientation::Rotate270 => (py, cw as i32 - px - rw as i32),
+        Orientation::Transverse => (ch as i32 - py - rh as i32, cw as i32 - px - rw as i32),
+    };
+}
+
 fn compose_regions(outer: Region, inner: Region, source_w: u32, source_h: u32) -> Region {
     // Resolve outer to absolute coordinates
     let (ol, ot, or_, ob) = outer.resolve(source_w, source_h);
