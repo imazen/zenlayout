@@ -1662,31 +1662,46 @@ fn resolve_region(
     let is_pure_crop = place_x == 0 && place_y == 0 && vw == overlap_w && vh == overlap_h;
 
     if let Some(c) = constraint {
-        // Constraint operates on the effective source (the overlap).
-        // Feed the overlap dimensions through the constraint, then
-        // scale the viewport proportionally.
-        let mut builder = c.clone();
-        if let Some(sc) = &source_crop {
-            builder = builder.source_crop(SourceCrop::Pixels(*sc));
+        if is_pure_crop {
+            // Pure crop: constraint operates on the overlap (cropped source).
+            let mut builder = c.clone();
+            if let Some(sc) = &source_crop {
+                builder = builder.source_crop(SourceCrop::Pixels(*sc));
+            }
+            builder.compute(source_w, source_h)
+        } else {
+            // Viewport has padding: constraint targets the viewport dimensions
+            // (the full padded area the user sees), then we back-derive content
+            // dimensions from the scale factor. This matches immediate mode where
+            // the user would resize the entire padded image.
+            let viewport_layout = c.clone().compute(vw, vh)?;
+            let scale_x = viewport_layout.resize_to.width as f64 / vw as f64;
+            let scale_y = viewport_layout.resize_to.height as f64 / vh as f64;
+
+            // Content dimensions scaled by the same factor as the viewport.
+            let content_w = (overlap_w as f64 * scale_x).round().max(1.0) as u32;
+            let content_h = (overlap_h as f64 * scale_y).round().max(1.0) as u32;
+            let content_place_x = (place_x as f64 * scale_x).round() as i32;
+            let content_place_y = (place_y as f64 * scale_y).round() as i32;
+
+            // Use the constraint's canvas (which may include its own padding
+            // for FitPad/WithinPad), adjusted for the viewport placement.
+            let canvas = viewport_layout.canvas;
+            let (vp_px, vp_py) = viewport_layout.placement;
+
+            Ok(Layout {
+                source: Size::new(source_w, source_h),
+                source_crop,
+                resize_to: Size::new(content_w, content_h),
+                canvas,
+                placement: (vp_px + content_place_x, vp_py + content_place_y),
+                canvas_color: if reg.color != CanvasColor::Transparent {
+                    reg.color
+                } else {
+                    viewport_layout.canvas_color
+                },
+            })
         }
-        let mut constrained = builder.compute(source_w, source_h)?;
-
-        if !is_pure_crop {
-            // Scale the viewport padding proportionally with the constraint.
-            let scale_x = constrained.resize_to.width as f64 / overlap_w as f64;
-            let scale_y = constrained.resize_to.height as f64 / overlap_h as f64;
-
-            let new_canvas_w = (vw as f64 * scale_x).round().max(1.0) as u32;
-            let new_canvas_h = (vh as f64 * scale_y).round().max(1.0) as u32;
-            let new_place_x = (place_x as f64 * scale_x).round() as i32;
-            let new_place_y = (place_y as f64 * scale_y).round() as i32;
-
-            constrained.canvas = Size::new(new_canvas_w, new_canvas_h);
-            constrained.placement = (new_place_x, new_place_y);
-            constrained.canvas_color = reg.color;
-        }
-
-        Ok(constrained)
     } else {
         Ok(Layout {
             source: Size::new(source_w, source_h),
@@ -4685,23 +4700,23 @@ mod tests {
     #[test]
     fn region_pad_with_constraint() {
         // Region pads 50px around 800×600 source → viewport 900×700
-        // Then Fit to 450×350: source 800×600 fits as 450×337
-        // Scale factor = 450/800 = 0.5625
-        // Canvas = 900 * 0.5625 × 700 * 0.5625 = 506×394 (approx)
-        // Placement = 50 * 0.5625 × 50 * 0.5625 = 28×28
+        // Then Fit to 450×350: constraint targets viewport 900×700.
+        // Fit 900×700 into 450×350 → 450×350 (scale = 450/900 = 0.5)
+        // Wait: 900/700 = 1.286, 450/350 = 1.286. Same aspect → exact fit.
+        // scale_x = 450/900 = 0.5, scale_y = 350/700 = 0.5
+        // Content 800×600 resizes by 0.5 → 400×300.
+        // Placement = 50 * 0.5 = 25px on each side.
         let (ideal, _) = Pipeline::new(800, 600)
             .region(Region::padded(50, CanvasColor::white()))
             .fit(450, 350)
             .plan()
             .unwrap();
-        // The constraint operates on the 800×600 overlap, fitting to 450×350
-        // → fit 800×600 into 450×350 → 450×338 (4:3 → 450×337.5→338)
-        assert_eq!(ideal.layout.resize_to, Size::new(450, 338));
-        // Canvas scales proportionally
-        let expected_canvas_w = (900.0_f64 * 450.0 / 800.0).round() as u32;
-        let expected_canvas_h = (700.0_f64 * 338.0 / 600.0).round() as u32;
-        assert_eq!(ideal.layout.canvas.width, expected_canvas_w);
-        assert_eq!(ideal.layout.canvas.height, expected_canvas_h);
+        // Constraint targets viewport 900×700, fit to 450×350 → 450×350
+        assert_eq!(ideal.layout.canvas, Size::new(450, 350));
+        // Content = 800 * 0.5 × 600 * 0.5 = 400×300
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 300));
+        // Placement = 50 * 0.5 = 25
+        assert_eq!(ideal.layout.placement, (25, 25));
     }
 
     // ── Region with percentages ────────────────────────────────────────

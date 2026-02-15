@@ -612,10 +612,10 @@ fn constrain_then_crop_center_pixel_detail() {
 
 #[test]
 fn pad_region_then_constrain() {
-    // Pad then resize: immediate mode resizes the padded image.
-    // Fused mode resizes the source overlap, scales viewport proportionally.
-    // For nearest-neighbor, these can differ because the constraint targets
-    // different dimensions (overlap vs viewport).
+    // Pad then resize: constraint now targets viewport dimensions.
+    // For this case (8x8 source, pad 4 → 16x16, Fit 8x8), the constraint
+    // targets 16x16 with scale 0.5, producing 8x8 canvas with 4x4 content
+    // at (2,2). This matches immediate mode: pad to 16x16, resize to 8x8.
     let src = Grid::source(8, 8);
     let commands = [
         Command::Region(Region::padded(4, CanvasColor::Transparent)),
@@ -623,32 +623,14 @@ fn pad_region_then_constrain() {
             constraint: Constraint::new(ConstraintMode::Fit, 8, 8),
         },
     ];
-
-    let immediate = immediate_eval(&src, &commands);
-    let fused = fused_eval(&src, &commands).unwrap();
-
-    eprintln!("pad(4)→fit(8x8) on 8x8 source:");
-    eprintln!("Immediate: pad to 16x16, resize to 8x8 → {}x{}", immediate.width, immediate.height);
-    eprintln!("Fused: overlap=8x8, Fit(8x8)→resize_to=8x8, scale=1.0 → {}x{}", fused.width, fused.height);
-
-    let match_ok = immediate.width == fused.width
-        && immediate.height == fused.height
-        && immediate.pixels == fused.pixels;
-
-    if !match_ok {
-        eprintln!("MISMATCH:");
-        eprintln!("Immediate:");
-        eprintln!("{}", immediate.summary());
-        eprintln!("Fused:");
-        eprintln!("{}", fused.summary());
-    }
-    // Document the mismatch — this is a known semantic gap
-    assert!(!match_ok, "Expected mismatch for pad→constrain but they matched");
+    compare("pad(4)→fit(8x8) on 8x8", &src, &commands);
 }
 
 #[test]
 fn pad_region_then_constrain_downscale() {
-    // Source 16x16, pad 4 → 24x24 viewport, Fit(8x8) → should be 8x8
+    // Source 16x16, pad 4 → 24x24 viewport, Fit(8x8) → 8x8 output.
+    // Dimensions match, but NN pixel coordinates differ because the
+    // single-pass layout resizes content separately from padding.
     let src = Grid::source(16, 16);
     let commands = [
         Command::Region(Region::padded(4, CanvasColor::Transparent)),
@@ -660,22 +642,14 @@ fn pad_region_then_constrain_downscale() {
     let immediate = immediate_eval(&src, &commands);
     let fused = fused_eval(&src, &commands).unwrap();
 
-    eprintln!("pad(4)→fit(8x8) on 16x16 source:");
-    eprintln!("Immediate: pad to 24x24, fit to 8x8 → {}x{}", immediate.width, immediate.height);
-    eprintln!("Fused → {}x{}", fused.width, fused.height);
-
-    if immediate.width != fused.width || immediate.height != fused.height {
-        eprintln!("SIZE MISMATCH: immediate={}x{}, fused={}x{}",
-            immediate.width, immediate.height, fused.width, fused.height);
-    }
-
-    if immediate.pixels != fused.pixels {
-        eprintln!("PIXEL MISMATCH");
-        eprintln!("Immediate:");
-        eprintln!("{}", immediate.summary());
-        eprintln!("Fused:");
-        eprintln!("{}", fused.summary());
-    }
+    // Dimensions MUST match (constraint targets viewport → 8x8).
+    assert_eq!(
+        (immediate.width, immediate.height),
+        (fused.width, fused.height),
+        "pad+constrain dimensions should match"
+    );
+    // Pixel-level differences are expected: NN resampling a padded viewport
+    // vs content-only produces different sampling grids at the boundary.
 }
 
 #[test]
