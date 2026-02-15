@@ -6,7 +6,7 @@ Pure geometry — no pixel operations, no allocations, `no_std` compatible.
 
 ## What it does
 
-Given source dimensions and a set of commands (orient, crop, constrain, pad), zenlayout computes every dimension, crop rect, and placement offset needed to produce the output. It handles EXIF orientation, aspect-ratio-aware scaling, codec alignment (JPEG MCU boundaries), and gain map / secondary plane spatial locking.
+Given source dimensions and a set of commands (orient, crop, region, constrain, pad), zenlayout computes every dimension, crop rect, and placement offset needed to produce the output. It handles EXIF orientation, aspect-ratio-aware scaling, codec alignment (JPEG MCU boundaries), and gain map / secondary plane spatial locking.
 
 What it doesn't do: touch pixels. That's your resize engine's job.
 
@@ -32,6 +32,44 @@ let plan = ideal.finalize(&request, &offer);
 // plan.resize_to, plan.canvas, plan.remaining_orientation, etc.
 // contain everything the resize engine needs
 ```
+
+## Processing pipeline
+
+The pipeline processes commands in a fixed order, regardless of the order they appear in the command list. First matching command wins for each slot (crop/region, constrain, pad).
+
+```text
+Pipeline processing order (fixed mode)
+══════════════════════════════════════
+
+1. ORIENT — All orientation commands (auto_orient, rotate, flip) fuse into
+   a single net orientation via D4 group composition. Source dimensions
+   transform to post-orientation space.
+
+   Multiple rotations/flips compose algebraically:
+     .auto_orient(6).rotate_90() = Rotate90 ∘ Rotate90 = Rotate180
+
+2. REGION or CROP — Define the effective source. First one wins.
+   - Crop: select a rectangle within the source
+   - Region: viewport into infinite canvas (can crop, pad, or both)
+   Crop converts to Region internally.
+
+3. CONSTRAIN — Resize the effective source to target dimensions. First one
+   wins. The 8 constraint modes control aspect ratio handling.
+   - Single-axis constraints derive the missing dimension from aspect ratio
+
+4. PAD — Add explicit padding around the constrained result. First one wins.
+   Additive on canvas dimensions. Padding does NOT collapse — pad(10,10,10,10)
+   always adds exactly 10px on each side regardless of other commands.
+   Unlike CSS margin collapsing.
+
+5. LIMITS — Safety limits applied to the final canvas:
+   a. max — proportional downscale if canvas exceeds max (security cap)
+   b. min — proportional upscale if canvas below min (quality floor)
+   c. align — snap to codec multiples (may slightly exceed max/drop below min)
+   Max always wins over min.
+```
+
+**Sequential mode** (`plan_sequential()` / `compute_layout_sequential()`): same operations, but commands execute in order. Orient still fuses. Multiple crop/region compose (each refines the previous). Last constrain wins. Post-constrain crop/pad adjusts the output canvas.
 
 ## Two-phase layout
 
@@ -91,6 +129,128 @@ Eight modes control how source dimensions map to target dimensions:
 
 Single-axis constraints are supported: `Constraint::width_only()` and `Constraint::height_only()` derive the other dimension from the source aspect ratio.
 
+## Orientation
+
+`Orientation` is an enum modeling the D4 dihedral group — 4 rotations × 2 flip states = 8 elements, matching EXIF orientations 1-8.
+
+```text
+Orientation decomposition
+─────────────────────────
+Every orientation is a rotation (0°/90°/180°/270°) optionally followed
+by a horizontal flip:
+
+| Orientation | = Rotation  | + FlipH? | Swaps axes? |
+|-------------|-------------|----------|-------------|
+| Identity    | 0°          | no       | no          |
+| FlipH       | 0°          | yes      | no          |
+| Rotate180   | 180°        | no       | no          |
+| FlipV       | 180°        | yes      | no          |
+| Transpose   | 90° CW      | yes      | yes         |
+| Rotate90    | 90° CW      | no       | yes         |
+| Transverse  | 270° CW     | yes      | yes         |
+| Rotate270   | 270° CW     | no       | yes         |
+```
+
+Transpose reflects over the main diagonal (top-left to bottom-right). Transverse reflects over the anti-diagonal (top-right to bottom-left). Both swap width and height.
+
+Orientations compose algebraically and are verified against the D4 Cayley table:
+
+```rust
+use zenlayout::Orientation;
+
+let exif6 = Orientation::from_exif(6).unwrap(); // 90° CW
+let combined = exif6.compose(Orientation::FlipH);
+assert_eq!(combined, Orientation::Transpose);   // EXIF 5
+
+// Inverse undoes:
+assert_eq!(exif6.compose(exif6.inverse()), Orientation::Identity);
+```
+
+Multiple orientation commands in a pipeline fuse into a single net orientation:
+- `.auto_orient(6).rotate_90()` = `Rotate90.compose(Rotate90)` = `Rotate180`
+- Order matters: `a.compose(b)` = apply `a` first, then `b`
+
+## Region
+
+`Region` defines a viewport rectangle in source coordinates. It unifies crop and pad into a single concept:
+
+- Viewport smaller than source → crop
+- Viewport extending beyond source → pad (filled with `color`)
+- Viewport entirely outside source → blank canvas
+
+Coordinates are expressed as `RegionCoord`: a percentage of source dimension plus a pixel offset. This allows expressions like "10% from the left edge" or "50 pixels past the right edge".
+
+```rust
+use zenlayout::{Pipeline, Region, RegionCoord, CanvasColor};
+
+// 50px padding on all sides
+let (ideal, _) = Pipeline::new(800, 600)
+    .region(Region::padded(50, CanvasColor::white()))
+    .plan()
+    .unwrap();
+// Canvas: 900×700, source at (50, 50)
+
+// Mixed crop+pad: extend left, crop right
+let (ideal, _) = Pipeline::new(800, 600)
+    .region_viewport(-50, 0, 600, 600, CanvasColor::black())
+    .plan()
+    .unwrap();
+// Canvas: 650×600, 600×600 of source at (50, 0)
+
+// Percentage-based crop: 10% from each edge
+let reg = Region {
+    left: RegionCoord::pct(0.1),
+    top: RegionCoord::pct(0.1),
+    right: RegionCoord::pct(0.9),
+    bottom: RegionCoord::pct(0.9),
+    color: CanvasColor::Transparent,
+};
+
+// Blank canvas
+let (ideal, _) = Pipeline::new(800, 600)
+    .region_blank(200, 100, CanvasColor::white())
+    .plan()
+    .unwrap();
+```
+
+`SourceCrop` converts to `Region` internally via `to_region()`. Region and Crop are mutually exclusive — first one set wins in fixed mode.
+
+When a Region is combined with a constraint, the constraint operates on the overlap between the viewport and the source. The viewport's padding areas scale proportionally.
+
+## Sequential mode
+
+For scripting use cases where command order matters, use sequential evaluation:
+
+```rust
+use zenlayout::{Pipeline, compute_layout_sequential, Command, SourceCrop};
+
+// Pipeline API
+let (ideal, _) = Pipeline::new(800, 600)
+    .crop_pixels(100, 100, 600, 400)  // first crop
+    .crop_pixels(50, 50, 500, 300)    // refines the first crop
+    .fit(200, 150)
+    .plan_sequential()
+    .unwrap();
+
+// Command slice API
+let commands = [
+    Command::Crop(SourceCrop::pixels(100, 100, 600, 400)),
+    Command::Crop(SourceCrop::pixels(50, 50, 500, 300)),
+];
+let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
+```
+
+Sequential mode differences from fixed mode:
+- **Orient**: still fuses (composes algebraically) regardless of position
+- **Crop/Region**: compose sequentially (second crop refines the first)
+- **Constrain**: last one wins (not first)
+- **Post-constrain crop/pad**: adjusts the output canvas, not the source
+- **Limits**: applied once at the end (same as fixed)
+
+## Padding
+
+Padding values are absolute pixel counts. They do not collapse, merge, or interact — `pad(10, 10, 10, 10)` always adds exactly 10px on each side regardless of other commands. This differs from CSS margin collapsing.
+
 ## Full API reference
 
 ### `Size`
@@ -126,7 +286,7 @@ pub struct Rect {
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `new` | `const fn new(x: u32, y: u32, width: u32, height: u32) -> Self` | Create a new rect |
-| `clamp_to` | `fn clamp_to(self, max_w: u32, max_h: u32) -> Self` | Clamp to fit within bounds (width/height ≥ 1) |
+| `clamp_to` | `fn clamp_to(self, max_w: u32, max_h: u32) -> Self` | Clamp to fit within bounds (width/height >= 1) |
 | `is_full` | `fn is_full(&self, source_w: u32, source_h: u32) -> bool` | Whether this rect covers the full source |
 
 Derives: `Copy`, `Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`
@@ -192,6 +352,51 @@ Region of source image to use before applying the constraint.
 | `margin_percent` | `fn margin_percent(margin: f32) -> Self` | Crop equal margins from all edges |
 | `margins_percent` | `fn margins_percent(top: f32, right: f32, bottom: f32, left: f32) -> Self` | Crop specific margins (CSS order) |
 | `resolve` | `fn resolve(&self, source_w: u32, source_h: u32) -> Rect` | Resolve to pixel coordinates for a given source size |
+| `to_region` | `fn to_region(self) -> Region` | Convert to an equivalent Region (transparent fill) |
+
+Derives: `Copy`, `Clone`, `Debug`, `PartialEq`
+
+### `RegionCoord`
+
+A coordinate expressed as percentage of source dimension plus pixel offset.
+
+```rust
+pub struct RegionCoord {
+    pub percent: f32,  // Fraction of source dimension (0.0 = origin, 1.0 = far edge)
+    pub pixels: i32,   // Additional pixel offset (can be negative)
+}
+```
+
+Resolved as: `source_dimension * percent + pixels`
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `px` | `const fn px(pixels: i32) -> Self` | Coordinate at a pixel offset from origin |
+| `pct` | `const fn pct(percent: f32) -> Self` | Coordinate at a percentage of source dimension |
+| `pct_px` | `const fn pct_px(percent: f32, pixels: i32) -> Self` | Coordinate at percentage plus pixel offset |
+| `resolve` | `fn resolve(self, source_dim: u32) -> i32` | Resolve to absolute pixel coordinate |
+
+Derives: `Copy`, `Clone`, `Debug`, `PartialEq`
+
+### `Region`
+
+A viewport rectangle in source coordinates. Unifies crop and pad.
+
+```rust
+pub struct Region {
+    pub left: RegionCoord,
+    pub top: RegionCoord,
+    pub right: RegionCoord,
+    pub bottom: RegionCoord,
+    pub color: CanvasColor,  // Fill color for areas outside the source
+}
+```
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `crop` | `const fn crop(left: i32, top: i32, right: i32, bottom: i32) -> Self` | Viewport from pixel edges (transparent fill) |
+| `padded` | `const fn padded(amount: u32, color: CanvasColor) -> Self` | Uniform padding around full source |
+| `blank` | `const fn blank(width: u32, height: u32, color: CanvasColor) -> Self` | Blank canvas (no source content) |
 
 Derives: `Copy`, `Clone`, `Debug`, `PartialEq`
 
@@ -248,7 +453,7 @@ pub struct Layout {
     pub source: Size,                    // Original source dimensions
     pub source_crop: Option<Rect>,       // Region of source to use (None = full)
     pub resize_to: Size,                 // Dimensions to resize cropped source to
-    pub canvas: Size,                    // Final output canvas (≥ resize_to)
+    pub canvas: Size,                    // Final output canvas (>= resize_to)
     pub placement: (u32, u32),           // Top-left offset of image on canvas
     pub canvas_color: CanvasColor,       // Background color for padding areas
 }
@@ -271,6 +476,7 @@ Layout computation error.
 |---------|-----------------|
 | `ZeroSourceDimension` | "source image has zero width or height" |
 | `ZeroTargetDimension` | "target width or height is zero" |
+| `ZeroRegionDimension` | "region viewport has zero or negative width or height" |
 
 Implements: `Display` (always), `Error` (behind `std` feature)
 
@@ -284,14 +490,18 @@ Builder for image processing pipelines. All operations are in post-orientation c
 |--------|-----------|-------------|
 | `new` | `fn new(source_w: u32, source_h: u32) -> Self` | Create pipeline for source image |
 | `auto_orient` | `fn auto_orient(self, exif: u8) -> Self` | Apply EXIF orientation (1-8). Invalid values ignored. |
-| `rotate_90` | `fn rotate_90(self) -> Self` | Rotate 90° CW. Stacks with other orientations. |
-| `rotate_180` | `fn rotate_180(self) -> Self` | Rotate 180°. Stacks. |
-| `rotate_270` | `fn rotate_270(self) -> Self` | Rotate 270° CW. Stacks. |
+| `rotate_90` | `fn rotate_90(self) -> Self` | Rotate 90 deg CW. Stacks with other orientations. |
+| `rotate_180` | `fn rotate_180(self) -> Self` | Rotate 180 deg. Stacks. |
+| `rotate_270` | `fn rotate_270(self) -> Self` | Rotate 270 deg CW. Stacks. |
 | `flip_h` | `fn flip_h(self) -> Self` | Flip horizontally. Stacks. |
 | `flip_v` | `fn flip_v(self) -> Self` | Flip vertically. Stacks. |
-| `crop_pixels` | `fn crop_pixels(self, x: u32, y: u32, width: u32, height: u32) -> Self` | Crop to pixel coords (first crop wins) |
-| `crop_percent` | `fn crop_percent(self, x: f32, y: f32, width: f32, height: f32) -> Self` | Crop using percentages (first crop wins) |
-| `crop` | `fn crop(self, source_crop: SourceCrop) -> Self` | Crop with pre-built `SourceCrop` (first crop wins) |
+| `crop_pixels` | `fn crop_pixels(self, x: u32, y: u32, width: u32, height: u32) -> Self` | Crop to pixel coords (first wins) |
+| `crop_percent` | `fn crop_percent(self, x: f32, y: f32, width: f32, height: f32) -> Self` | Crop using percentages (first wins) |
+| `crop` | `fn crop(self, source_crop: SourceCrop) -> Self` | Crop with pre-built `SourceCrop` (first wins) |
+| `region` | `fn region(self, region: Region) -> Self` | Set viewport region (first crop/region wins) |
+| `region_viewport` | `fn region_viewport(self, left: i32, top: i32, right: i32, bottom: i32, color: CanvasColor) -> Self` | Viewport from pixel edges |
+| `region_pad` | `fn region_pad(self, amount: u32, color: CanvasColor) -> Self` | Uniform padding via region |
+| `region_blank` | `fn region_blank(self, width: u32, height: u32, color: CanvasColor) -> Self` | Blank canvas (no source content) |
 | `fit` | `fn fit(self, width: u32, height: u32) -> Self` | Fit within target (may upscale) |
 | `within` | `fn within(self, width: u32, height: u32) -> Self` | Fit within target (never upscales) |
 | `fit_crop` | `fn fit_crop(self, width: u32, height: u32) -> Self` | Fill target, crop overflow |
@@ -300,11 +510,12 @@ Builder for image processing pipelines. All operations are in post-orientation c
 | `within_pad` | `fn within_pad(self, width: u32, height: u32) -> Self` | Fit within target, pad, never upscales |
 | `distort` | `fn distort(self, width: u32, height: u32) -> Self` | Scale to exact target (stretches) |
 | `aspect_crop` | `fn aspect_crop(self, width: u32, height: u32) -> Self` | Crop to target aspect ratio, no scaling |
-| `constrain` | `fn constrain(self, constraint: Constraint) -> Self` | Apply pre-built `Constraint` (first constraint wins) |
+| `constrain` | `fn constrain(self, constraint: Constraint) -> Self` | Apply pre-built `Constraint` (first wins) |
 | `pad_uniform` | `fn pad_uniform(self, amount: u32, color: CanvasColor) -> Self` | Add uniform padding on all sides |
-| `pad` | `fn pad(self, top: u32, right: u32, bottom: u32, left: u32, color: CanvasColor) -> Self` | Add asymmetric padding (first pad wins) |
+| `pad` | `fn pad(self, top: u32, right: u32, bottom: u32, left: u32, color: CanvasColor) -> Self` | Add asymmetric padding (first wins) |
 | `output_limits` | `fn output_limits(self, limits: OutputLimits) -> Self` | Apply safety limits after layout computation |
-| `plan` | `fn plan(self) -> Result<(IdealLayout, DecoderRequest), LayoutError>` | Compute ideal layout (phase 1) |
+| `plan` | `fn plan(self) -> Result<(IdealLayout, DecoderRequest), LayoutError>` | Compute ideal layout (fixed pipeline, phase 1) |
+| `plan_sequential` | `fn plan_sequential(self) -> Result<(IdealLayout, DecoderRequest), LayoutError>` | Compute ideal layout (sequential evaluation, phase 1) |
 
 Derives: `Clone`, `Debug`
 
@@ -318,10 +529,11 @@ Individual processing command for programmatic construction (alternative to `Pip
 | `Rotate(Rotation)` | | Manual rotation |
 | `Flip(FlipAxis)` | | Manual flip |
 | `Crop(SourceCrop)` | | Crop in post-orientation coordinates |
+| `Region(Region)` | | Viewport region in post-orientation coordinates |
 | `Constrain` | `{ constraint: Constraint }` | Constrain dimensions |
 | `Pad` | `{ top, right, bottom, left: u32, color: CanvasColor }` | Add padding |
 
-Only the first `Crop`, first `Constrain`, and first `Pad` are used; duplicates ignored.
+In fixed mode (`compute_layout`): first `Crop`/`Region`, first `Constrain`, and first `Pad` win; duplicates ignored. In sequential mode (`compute_layout_sequential`): commands compose in order.
 
 Derives: `Clone`, `Debug`, `PartialEq`
 
@@ -329,9 +541,9 @@ Derives: `Clone`, `Debug`, `PartialEq`
 
 | Variant | Description |
 |---------|-------------|
-| `Rotate90` | 90° clockwise |
-| `Rotate180` | 180° |
-| `Rotate270` | 270° clockwise (90° counter-clockwise) |
+| `Rotate90` | 90 deg clockwise |
+| `Rotate180` | 180 deg |
+| `Rotate270` | 270 deg clockwise (90 deg counter-clockwise) |
 
 Derives: `Copy`, `Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`
 
@@ -341,6 +553,34 @@ Derives: `Copy`, `Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`
 |---------|-------------|
 | `Horizontal` | Flip left-right |
 | `Vertical` | Flip top-bottom |
+
+Derives: `Copy`, `Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`
+
+### `Orientation`
+
+Image orientation as an element of the D4 dihedral group. `#[non_exhaustive]`.
+
+| Variant | EXIF | Description |
+|---------|------|-------------|
+| `Identity` | 1 | No transformation |
+| `FlipH` | 2 | Horizontal flip |
+| `Rotate180` | 3 | 180 deg rotation |
+| `FlipV` | 4 | Vertical flip |
+| `Transpose` | 5 | Reflect over main diagonal |
+| `Rotate90` | 6 | 90 deg clockwise |
+| `Transverse` | 7 | Reflect over anti-diagonal |
+| `Rotate270` | 8 | 270 deg clockwise |
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `from_exif` | `const fn from_exif(value: u8) -> Option<Self>` | Create from EXIF tag (1-8). `None` for invalid. |
+| `to_exif` | `const fn to_exif(self) -> u8` | Convert to EXIF tag (1-8) |
+| `is_identity` | `const fn is_identity(self) -> bool` | Whether this is the identity |
+| `swaps_axes` | `const fn swaps_axes(self) -> bool` | Whether width and height swap |
+| `compose` | `const fn compose(self, other: Self) -> Self` | Apply `self` then `other` (D4 group multiplication) |
+| `inverse` | `const fn inverse(self) -> Self` | Inverse: `self.compose(self.inverse()) == Identity` |
+| `transform_dimensions` | `const fn transform_dimensions(self, w: u32, h: u32) -> Size` | Transform source dimensions to display dimensions |
+| `transform_rect_to_source` | `fn transform_rect_to_source(self, rect: Rect, source_w: u32, source_h: u32) -> Rect` | Transform display rect back to source coordinates |
 
 Derives: `Copy`, `Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`
 
@@ -455,8 +695,8 @@ Post-computation safety limits applied after all layout computation.
 
 ```rust
 pub struct OutputLimits {
-    pub max: Option<Size>,       // Security cap — proportional downscale if exceeded
-    pub min: Option<Size>,       // Quality floor — proportional upscale if below
+    pub max: Option<Size>,       // Security cap -- proportional downscale if exceeded
+    pub min: Option<Size>,       // Quality floor -- proportional upscale if below
     pub align: Option<Align>,    // Snap to codec-required multiples
 }
 ```
@@ -474,11 +714,11 @@ Derives: `Copy`, `Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`
 How to align output dimensions to codec-required multiples.
 
 ```text
-    Source: 801×601, align to mod-16
+    Source: 801x601, align to mod-16
 
-    Crop:     800×592  --  round down, lose edge pixels
-    Extend:   816×608  --  round up, replicate edges, content_size=(801,601)
-    Distort:  800×608  --  round to nearest, slight stretch
+    Crop:     800x592  --  round down, lose edge pixels
+    Extend:   816x608  --  round up, replicate edges, content_size=(801,601)
+    Distort:  800x608  --  round to nearest, slight stretch
 ```
 
 | Variant | Description |
@@ -501,9 +741,9 @@ Chroma subsampling scheme for JPEG/video codecs.
 
 | Variant | Description | MCU size |
 |---------|-------------|----------|
-| `S444` | No subsampling. Chroma same as luma. | 8×8 |
-| `S422` | Half-width chroma, full height. | 16×8 |
-| `S420` | Quarter chroma (half width and height). | 16×16 |
+| `S444` | No subsampling. Chroma same as luma. | 8x8 |
+| `S422` | Half-width chroma, full height. | 16x8 |
+| `S420` | Quarter chroma (half width and height). | 16x16 |
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
@@ -537,53 +777,16 @@ Derives: `Copy`, `Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`
 
 ### `PlaneLayout`
 
-Geometry for a single image plane (luma or chroma). Block size is always 8×8 (DCT block).
+Geometry for a single image plane (luma or chroma). Block size is always 8x8 (DCT block).
 
 ```rust
 pub struct PlaneLayout {
     pub content: Size,     // Content dimensions in pixels
     pub extended: Size,    // Allocated/encoded dimensions (extended to block boundary)
-    pub blocks_w: u32,     // Number of 8×8 blocks per row
-    pub blocks_h: u32,     // Number of 8×8 blocks per column
+    pub blocks_w: u32,     // Number of 8x8 blocks per row
+    pub blocks_h: u32,     // Number of 8x8 blocks per column
 }
 ```
-
-Derives: `Copy`, `Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`
-
-### `Orientation`
-
-Image orientation as an element of the D4 dihedral group — 4 rotations × 2 flip states = 8 elements, matching EXIF orientations 1-8.
-
-```rust
-pub struct Orientation {
-    pub rotation: u8,    // 0-3: 0°, 90°, 180°, 270° clockwise
-    pub flip: bool,      // Horizontal flip applied after rotation
-}
-```
-
-**Constants:**
-
-| Constant | EXIF | Description |
-|----------|------|-------------|
-| `IDENTITY` | 1 | No transformation |
-| `FLIP_H` | 2 | Horizontal flip |
-| `ROTATE_180` | 3 | 180° rotation |
-| `FLIP_V` | 4 | Vertical flip |
-| `TRANSPOSE` | 5 | Reflect over main diagonal |
-| `ROTATE_90` | 6 | 90° clockwise |
-| `TRANSVERSE` | 7 | Reflect over anti-diagonal |
-| `ROTATE_270` | 8 | 270° clockwise |
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `from_exif` | `fn from_exif(value: u8) -> Option<Self>` | Create from EXIF tag (1-8). `None` for invalid. |
-| `to_exif` | `fn to_exif(self) -> u8` | Convert to EXIF tag (1-8) |
-| `is_identity` | `fn is_identity(self) -> bool` | Whether this is the identity |
-| `swaps_axes` | `fn swaps_axes(self) -> bool` | Whether width and height swap |
-| `compose` | `fn compose(self, other: Self) -> Self` | Apply `self` then `other` (D4 group multiplication) |
-| `inverse` | `fn inverse(self) -> Self` | Inverse: `self.compose(self.inverse()) == IDENTITY` |
-| `transform_dimensions` | `fn transform_dimensions(self, w: u32, h: u32) -> Size` | Transform source dimensions to display dimensions |
-| `transform_rect_to_source` | `fn transform_rect_to_source(self, rect: Rect, source_w: u32, source_h: u32) -> Rect` | Transform display rect back to source coordinates |
 
 Derives: `Copy`, `Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`
 
@@ -591,58 +794,8 @@ Derives: `Copy`, `Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `compute_layout` | `fn compute_layout(commands: &[Command], source_w: u32, source_h: u32, limits: Option<&OutputLimits>) -> Result<(IdealLayout, DecoderRequest), LayoutError>` | Compute layout from command slice (lower-level than `Pipeline`) |
-
-## Orientation
-
-`Orientation` models the D4 dihedral group — 4 rotations × 2 flip states = 8 elements, matching EXIF orientations 1-8. Orientations compose algebraically (verified against the D4 Cayley table):
-
-```rust
-use zenlayout::Orientation;
-
-let exif6 = Orientation::from_exif(6).unwrap(); // 90° CW
-let combined = exif6.compose(Orientation::FLIP_H);
-assert_eq!(combined, Orientation::TRANSPOSE);   // EXIF 5
-```
-
-| EXIF | Name | Rotation | Flip |
-|------|------|----------|------|
-| 1 | Identity | 0° | No |
-| 2 | FlipH | 0° | Yes |
-| 3 | Rotate180 | 180° | No |
-| 4 | FlipV | 180° | Yes |
-| 5 | Transpose | 90° | Yes |
-| 6 | Rotate90 | 90° | No |
-| 7 | Transverse | 270° | Yes |
-| 8 | Rotate270 | 270° | No |
-
-Coordinate transforms (`transform_dimensions`, `transform_rect_to_source`) convert between pre-orientation source coordinates and post-orientation display coordinates.
-
-## OutputLimits
-
-Post-computation safety limits applied after all constraint and padding logic:
-
-- **max** is a security cap. Applied first. Proportionally downscales the entire layout (resize_to, canvas, placement, source_crop) if the canvas exceeds either dimension.
-- **min** is a quality floor. Applied second. Proportionally upscales if the canvas is below either dimension. If min pushes past max, max is re-applied (max wins).
-- **align** snaps to codec-required multiples. Applied last. Because it rounds dimensions, it can slightly exceed max or drop below min — this is by design, since codec alignment is a hard requirement.
-
-## Align modes
-
-Three strategies for snapping to codec multiples:
-
-```text
-    Source: 801×601, align to mod-16
-
-    Crop:     800×592  --  round down, lose edge pixels
-    Extend:   816×608  --  round up, replicate edges, content_size=(801,601)
-    Distort:  800×608  --  round to nearest, slight stretch
-```
-
-- `Crop(x, y)` — rounds down per axis. Loses up to `n-1` edge pixels.
-- `Extend(x, y)` — rounds up per axis. No content loss. The renderer replicates edge pixels into the extension area. Original content dimensions are stored in `content_size`.
-- `Distort(x, y)` — rounds each axis to the nearest multiple. Minimal distortion, no pixel loss, no padding.
-
-`Subsampling::mcu_align()` returns the right `Align::Extend` for JPEG MCU alignment.
+| `compute_layout` | `fn compute_layout(commands: &[Command], source_w: u32, source_h: u32, limits: Option<&OutputLimits>) -> Result<(IdealLayout, DecoderRequest), LayoutError>` | Compute layout from command slice (fixed pipeline mode) |
+| `compute_layout_sequential` | `fn compute_layout_sequential(commands: &[Command], source_w: u32, source_h: u32, limits: Option<&OutputLimits>) -> Result<(IdealLayout, DecoderRequest), LayoutError>` | Compute layout from command slice (sequential evaluation) |
 
 ## Codec layout
 
@@ -668,8 +821,6 @@ assert_eq!(codec.mcu_cols, 50);
 assert_eq!(codec.luma_rows_per_mcu, 16);
 ```
 
-Supports `S444` (no subsampling, 8×8 MCU), `S422` (half-width chroma, 16×8 MCU), and `S420` (quarter chroma, 16×16 MCU).
-
 ## Secondary planes
 
 For gain maps, depth maps, or alpha planes that share spatial extent with the primary image but live at a different resolution:
@@ -677,7 +828,7 @@ For gain maps, depth maps, or alpha planes that share spatial extent with the pr
 ```rust
 use zenlayout::{Pipeline, DecoderOffer, Size};
 
-// SDR: 4000×3000, gain map: 1000×750 (1/4 scale)
+// SDR: 4000x3000, gain map: 1000x750 (1/4 scale)
 let (sdr_ideal, sdr_req) = Pipeline::new(4000, 3000)
     .auto_orient(6)
     .crop_pixels(100, 100, 2000, 2000)
@@ -685,7 +836,7 @@ let (sdr_ideal, sdr_req) = Pipeline::new(4000, 3000)
     .plan()
     .unwrap();
 
-// Derive gain map plan — automatically maintains the source ratio
+// Derive gain map plan -- automatically maintains the source ratio
 let (gm_ideal, gm_req) = sdr_ideal.derive_secondary(
     Size::new(4000, 3000),  // primary source
     Size::new(1000, 750),   // gain map source
@@ -708,7 +859,7 @@ Source crop coordinates are scaled from primary to secondary space with round-ou
 |------|---------|-------------|
 | `std` | Yes | Standard library support. Disable for `no_std` environments. Enables `Error` impl for `LayoutError`. |
 
-The crate uses `#![forbid(unsafe_code)]` and makes zero heap allocations.
+The crate uses `#![forbid(unsafe_code)]` and makes zero heap allocations (except for the `commands` Vec in `Pipeline` which is only used if `plan_sequential()` is called).
 
 ## License
 

@@ -62,18 +62,6 @@ pub enum Orientation {
 }
 
 impl Orientation {
-    /// All 8 elements of the D4 group, indexed by EXIF value - 1.
-    const ALL: [Self; 8] = [
-        Self::Identity,
-        Self::FlipH,
-        Self::Rotate180,
-        Self::FlipV,
-        Self::Transpose,
-        Self::Rotate90,
-        Self::Transverse,
-        Self::Rotate270,
-    ];
-
     /// Decompose into `(rotation_quarters, flip)` for composition math.
     ///
     /// `rotation_quarters` is 0-3 (number of 90° CW steps).
@@ -206,6 +194,18 @@ impl Orientation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// All 8 elements of the D4 group, indexed by EXIF value - 1.
+    const ALL: [Orientation; 8] = [
+        Orientation::Identity,
+        Orientation::FlipH,
+        Orientation::Rotate180,
+        Orientation::FlipV,
+        Orientation::Transpose,
+        Orientation::Rotate90,
+        Orientation::Transverse,
+        Orientation::Rotate270,
+    ];
 
     #[test]
     fn exif_round_trip() {
@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn inverse_all() {
-        let all = Orientation::ALL;
+        let all = ALL;
         for &o in &all {
             let inv = o.inverse();
             assert_eq!(
@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn associativity() {
-        let all = Orientation::ALL;
+        let all = ALL;
         for &a in &all {
             for &b in &all {
                 for &c in &all {
@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn identity_is_neutral() {
         let id = Orientation::Identity;
-        for &o in &Orientation::ALL {
+        for &o in &ALL {
             assert_eq!(id.compose(o), o);
             assert_eq!(o.compose(id), o);
         }
@@ -396,7 +396,7 @@ mod tests {
     #[test]
     fn transform_rect_full_image() {
         // Full image rect should map to full source rect for all orientations
-        for &o in &Orientation::ALL {
+        for &o in &ALL {
             let d = o.transform_dimensions(100, 200);
             let display_rect = Rect::new(0, 0, d.width, d.height);
             let source_rect = o.transform_rect_to_source(display_rect, 100, 200);
@@ -424,7 +424,7 @@ mod tests {
             (3, 2), // bottom-right (sw-1, sh-1)
         ];
 
-        for &o in &Orientation::ALL {
+        for &o in &ALL {
             let d = o.transform_dimensions(sw, sh);
             for &(sx, sy) in &corners {
                 // Forward-map this source pixel to display coords
@@ -457,7 +457,7 @@ mod tests {
     fn transform_rect_brute_force_4x3() {
         // Test every single-pixel rect in a 4x3 image
         let (sw, sh) = (4u32, 3u32);
-        for &o in &Orientation::ALL {
+        for &o in &ALL {
             let d = o.transform_dimensions(sw, sh);
             for sx in 0..sw {
                 for sy in 0..sh {
@@ -490,7 +490,7 @@ mod tests {
 
         // For all orientations: forward-map all 4 pixels in the 2x2 block,
         // find bounding box in display, that should be what maps back
-        for &o in &Orientation::ALL {
+        for &o in &ALL {
             // Forward-map corner pixels
             let (dx0, dy0) = forward_map_point(o, rect.x, rect.y, sw, sh);
             let (dx1, dy1) = forward_map_point(o, rect.x + rect.width - 1, rect.y, sw, sh);
