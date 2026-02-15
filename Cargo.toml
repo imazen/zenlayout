@@ -1,0 +1,14 @@
+[package]
+name = "zenlayout"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "AGPL-3.0-or-later"
+description = "Image layout computation with constraint modes, orientation, and decoder negotiation"
+repository = "https://github.com/imazen/zenlayout"
+keywords = ["image", "layout", "resize", "crop", "orientation"]
+categories = ["graphics", "multimedia::images", "no-std"]
+
+[features]
+default = ["std"]
+std = []
