@@ -148,31 +148,41 @@ pub struct LayoutPlan {
     pub encode_crop: Option<(u32, u32)>,
 }
 
-/// How to align canvas dimensions to codec-required multiples.
+/// How to align output dimensions to codec-required multiples.
 ///
-/// Both variants take `(x_align, y_align)` for per-axis alignment.
+/// All variants take `(x_align, y_align)` for per-axis alignment.
 /// Use [`Subsampling::mcu_align()`] for JPEG MCU-aligned extend.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Align {
-    /// Round canvas down to nearest multiple per axis. May lose pixels.
-    /// Use for video codecs (mod-2) where pixel-exact dimensions aren't critical.
-    RoundDown(u32, u32),
-    /// Extend canvas up to nearest multiple per axis. Image placed at `(0, 0)`,
-    /// renderer replicates edge pixels into the extension area. Original content
+    /// Round canvas down to nearest multiple per axis. Loses up to `n-1`
+    /// edge pixels per axis. Simple, lossy.
+    Crop(u32, u32),
+    /// Extend canvas up to nearest multiple per axis. Image at `(0, 0)`,
+    /// renderer replicates edge pixels into extension area. Original content
     /// dimensions stored in [`IdealLayout::encode_crop`] / [`LayoutPlan::encode_crop`].
-    /// No content loss.
+    /// No content loss. This is how JPEG MCU padding works.
     Extend(u32, u32),
+    /// Round `resize_to` to nearest multiple per axis, stretching content
+    /// slightly to fit. Minimal distortion, no pixel loss, no padding.
+    /// Canvas follows `resize_to` in non-pad modes; in pad modes the image
+    /// is recentered within the existing canvas.
+    Distort(u32, u32),
 }
 
 impl Align {
-    /// Uniform alignment (same for both axes).
-    pub const fn uniform_down(n: u32) -> Self {
-        Self::RoundDown(n, n)
+    /// Uniform crop alignment (same for both axes).
+    pub const fn uniform_crop(n: u32) -> Self {
+        Self::Crop(n, n)
     }
 
     /// Uniform extend alignment (same for both axes).
     pub const fn uniform_extend(n: u32) -> Self {
         Self::Extend(n, n)
+    }
+
+    /// Uniform distort alignment (same for both axes).
+    pub const fn uniform_distort(n: u32) -> Self {
+        Self::Distort(n, n)
     }
 }
 
@@ -401,9 +411,9 @@ impl MandatoryConstraints {
             }
         }
 
-        // 3. Align canvas to multiples (per-axis).
+        // 3. Align dimensions (per-axis).
         let encode_crop = match self.align {
-            Some(Align::RoundDown(nx, ny)) if nx > 1 || ny > 1 => {
+            Some(Align::Crop(nx, ny)) if nx > 1 || ny > 1 => {
                 let cw = if nx > 1 { (layout.canvas.0 / nx).max(1) * nx } else { layout.canvas.0 };
                 let ch = if ny > 1 { (layout.canvas.1 / ny).max(1) * ny } else { layout.canvas.1 };
                 layout.canvas = (cw, ch);
@@ -433,6 +443,28 @@ impl MandatoryConstraints {
                 } else {
                     None // already aligned
                 }
+            }
+            Some(Align::Distort(nx, ny)) if nx > 1 || ny > 1 => {
+                let old_resize = layout.resize_to;
+                let rw = if nx > 1 { round_to_nearest(old_resize.0, nx) } else { old_resize.0 };
+                let rh = if ny > 1 { round_to_nearest(old_resize.1, ny) } else { old_resize.1 };
+                layout.resize_to = (rw, rh);
+
+                // Non-pad (canvas == old resize): canvas follows resize_to.
+                // Pad (canvas > old resize): keep canvas, recenter image.
+                if layout.canvas.0 == old_resize.0 {
+                    layout.canvas.0 = rw;
+                    layout.placement.0 = 0;
+                } else {
+                    layout.placement.0 = (layout.canvas.0.saturating_sub(rw)) / 2;
+                }
+                if layout.canvas.1 == old_resize.1 {
+                    layout.canvas.1 = rh;
+                    layout.placement.1 = 0;
+                } else {
+                    layout.placement.1 = (layout.canvas.1.saturating_sub(rh)) / 2;
+                }
+                None
             }
             _ => None,
         };
@@ -802,6 +834,11 @@ impl IdealLayout {
 
 /// Scale a rect from one coordinate space to another, rounding outward.
 ///
+/// Round `v` to the nearest multiple of `n`. Ties round up.
+fn round_to_nearest(v: u32, n: u32) -> u32 {
+    ((v + n / 2) / n).max(1) * n
+}
+
 /// Origin (x, y) is floored, far edge (x+w, y+h) is ceiled, then clamped
 /// to the target dimensions. This ensures the scaled rect always covers
 /// at least the full spatial extent of the original.
@@ -2952,7 +2989,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(1000, 667)
             .fit(1000, 667)
             .limits(MandatoryConstraints {
-                align: Some(Align::RoundDown(16, 16)),
+                align: Some(Align::Crop(16, 16)),
                 ..Default::default()
             })
             .plan()
@@ -2968,7 +3005,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(801, 601)
             .fit(801, 601)
             .limits(MandatoryConstraints {
-                align: Some(Align::RoundDown(2, 2)),
+                align: Some(Align::Crop(2, 2)),
                 ..Default::default()
             })
             .plan()
@@ -2983,7 +3020,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(800, 600)
             .fit_pad(400, 400)
             .limits(MandatoryConstraints {
-                align: Some(Align::RoundDown(16, 16)),
+                align: Some(Align::Crop(16, 16)),
                 ..Default::default()
             })
             .plan()
@@ -3001,7 +3038,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(800, 600)
             .fit_pad(401, 401)
             .limits(MandatoryConstraints {
-                align: Some(Align::RoundDown(16, 16)),
+                align: Some(Align::Crop(16, 16)),
                 ..Default::default()
             })
             .plan()
@@ -3018,7 +3055,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(801, 601)
             .fit(801, 601)
             .limits(MandatoryConstraints {
-                align: Some(Align::RoundDown(1, 1)),
+                align: Some(Align::Crop(1, 1)),
                 ..Default::default()
             })
             .plan()
@@ -3035,7 +3072,7 @@ mod tests {
             .limits(MandatoryConstraints {
                 max: Some((1920, 1080)),
                 min: Some((100, 100)),
-                align: Some(Align::RoundDown(8, 8)),
+                align: Some(Align::Crop(8, 8)),
             })
             .plan()
             .unwrap();
@@ -3084,7 +3121,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(3, 3)
             .fit(3, 3)
             .limits(MandatoryConstraints {
-                align: Some(Align::RoundDown(16, 16)),
+                align: Some(Align::Crop(16, 16)),
                 ..Default::default()
             })
             .plan()
@@ -3321,7 +3358,7 @@ mod tests {
         let (ideal, _) = Pipeline::new(801, 601)
             .fit(801, 601)
             .limits(MandatoryConstraints {
-                align: Some(Align::RoundDown(16, 8)),
+                align: Some(Align::Crop(16, 8)),
                 ..Default::default()
             })
             .plan()
@@ -3348,6 +3385,109 @@ mod tests {
     fn subsampling_mcu_align_420() {
         let align = Subsampling::S420.mcu_align();
         assert_eq!(align, Align::Extend(16, 16));
+    }
+
+    // ── Align::Distort ─────────────────────────────────────────────────
+
+    #[test]
+    fn align_distort_rounds_to_nearest() {
+        // 801×601, distort mod-16 → resize_to rounds to nearest:
+        // 801 → 800 (801+8=809, 809/16=50, 50*16=800)
+        // 601 → 608 (601+8=609, 609/16=38, 38*16=608)
+        let (ideal, _) = Pipeline::new(801, 601)
+            .fit(801, 601)
+            .limits(MandatoryConstraints {
+                align: Some(Align::Distort(16, 16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.resize_to, (800, 608));
+        assert_eq!(ideal.layout.canvas, (800, 608));
+        assert_eq!(ideal.encode_crop, None); // no encode_crop for distort
+    }
+
+    #[test]
+    fn align_distort_already_aligned_noop() {
+        let (ideal, _) = Pipeline::new(800, 640)
+            .fit(800, 640)
+            .limits(MandatoryConstraints {
+                align: Some(Align::Distort(16, 16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.resize_to, (800, 640));
+        assert_eq!(ideal.layout.canvas, (800, 640));
+    }
+
+    #[test]
+    fn align_distort_mod2() {
+        // 801×601, distort mod-2 → 802×602
+        let (ideal, _) = Pipeline::new(801, 601)
+            .fit(801, 601)
+            .limits(MandatoryConstraints {
+                align: Some(Align::Distort(2, 2)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.resize_to, (802, 602));
+        assert_eq!(ideal.layout.canvas, (802, 602));
+    }
+
+    #[test]
+    fn align_distort_with_pad_recenters() {
+        // FitPad(401, 401) on 800×600 → resize_to=(401,301), canvas=(401,401)
+        // Distort mod-16: resize_to → round(401,16)=400, round(301,16)=304
+        // Canvas 401 > 400 → placement recentered. 401 > 304 → placement recentered.
+        let (ideal, _) = Pipeline::new(800, 600)
+            .fit_pad(401, 401)
+            .limits(MandatoryConstraints {
+                align: Some(Align::Distort(16, 16)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.resize_to.0 % 16, 0);
+        assert_eq!(ideal.layout.resize_to.1 % 16, 0);
+        // Canvas stays >= resize_to in padded mode
+        assert!(ideal.layout.canvas.0 >= ideal.layout.resize_to.0);
+        assert!(ideal.layout.canvas.1 >= ideal.layout.resize_to.1);
+    }
+
+    #[test]
+    fn align_distort_non_pad_canvas_tracks() {
+        // Fit(801, 601) → resize=801×601, canvas=801×601 (no pad)
+        // Distort mod-8: 801→800, 601→600
+        // Canvas ≤ resize → canvas follows
+        let (ideal, _) = Pipeline::new(801, 601)
+            .fit(801, 601)
+            .limits(MandatoryConstraints {
+                align: Some(Align::Distort(8, 8)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.resize_to, (800, 600));
+        assert_eq!(ideal.layout.canvas, (800, 600));
+        assert_eq!(ideal.layout.placement, (0, 0));
+    }
+
+    #[test]
+    fn align_distort_per_axis() {
+        // Distort: x mod-16, y mod-8. 801×601 → 800×600
+        let (ideal, _) = Pipeline::new(801, 601)
+            .fit(801, 601)
+            .limits(MandatoryConstraints {
+                align: Some(Align::Distort(16, 8)),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.resize_to.0 % 16, 0);
+        assert_eq!(ideal.layout.resize_to.1 % 8, 0);
+        assert_eq!(ideal.layout.resize_to, (800, 600));
     }
 
     // ── CodecLayout ─────────────────────────────────────────────────────
