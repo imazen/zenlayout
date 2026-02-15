@@ -4,7 +4,9 @@
 //! 1. [`plan()`] — compute ideal layout from commands + source dimensions → [`IdealLayout`] + [`DecoderRequest`]
 //! 2. [`finalize()`] — given what the decoder actually did ([`DecoderOffer`]), compute remaining work → [`LayoutPlan`]
 
-use crate::constraint::{CanvasColor, Constraint, Layout, LayoutError, Rect, SourceCrop};
+use crate::constraint::{
+    CanvasColor, Constraint, ConstraintMode, Gravity, Layout, LayoutError, Rect, SourceCrop,
+};
 use crate::orientation::Orientation;
 
 /// Rotation amount for manual rotation commands.
@@ -140,6 +142,206 @@ pub struct LayoutPlan {
     pub resize_is_identity: bool,
 }
 
+/// Builder for image processing pipelines.
+///
+/// Provides a fluent API for specifying orientation, crop, constraint, and
+/// padding operations. All operations are in post-orientation coordinates
+/// (what the user sees after rotation).
+///
+/// # Example
+///
+/// ```
+/// use zenlayout::{Pipeline, DecoderOffer};
+///
+/// // EXIF-rotated JPEG, fit to 400×300
+/// let (ideal, request) = Pipeline::new(4000, 3000)
+///     .auto_orient(6)
+///     .fit(400, 300)
+///     .plan()
+///     .unwrap();
+///
+/// // Decoder just decoded at full size
+/// let plan = ideal.finalize(&request, &DecoderOffer::full_decode(4000, 3000));
+/// assert!(!plan.resize_is_identity);
+/// ```
+#[derive(Clone, Debug)]
+pub struct Pipeline {
+    source_w: u32,
+    source_h: u32,
+    orientation: Orientation,
+    crop: Option<SourceCrop>,
+    constraint: Option<Constraint>,
+    padding: Option<Padding>,
+}
+
+impl Pipeline {
+    /// Create a pipeline for a source image of the given dimensions.
+    pub fn new(source_w: u32, source_h: u32) -> Self {
+        Self {
+            source_w,
+            source_h,
+            orientation: Orientation::IDENTITY,
+            crop: None,
+            constraint: None,
+            padding: None,
+        }
+    }
+
+    /// Apply EXIF orientation correction (value 1-8). Invalid values are ignored.
+    pub fn auto_orient(mut self, exif: u8) -> Self {
+        if let Some(o) = Orientation::from_exif(exif) {
+            self.orientation = self.orientation.compose(o);
+        }
+        self
+    }
+
+    /// Rotate 90 degrees clockwise. Stacks with EXIF and other rotations.
+    pub fn rotate_90(mut self) -> Self {
+        self.orientation = self.orientation.compose(Orientation::ROTATE_90);
+        self
+    }
+
+    /// Rotate 180 degrees. Stacks with EXIF and other rotations.
+    pub fn rotate_180(mut self) -> Self {
+        self.orientation = self.orientation.compose(Orientation::ROTATE_180);
+        self
+    }
+
+    /// Rotate 270 degrees clockwise. Stacks with EXIF and other rotations.
+    pub fn rotate_270(mut self) -> Self {
+        self.orientation = self.orientation.compose(Orientation::ROTATE_270);
+        self
+    }
+
+    /// Flip horizontally. Stacks with EXIF and other orientation commands.
+    pub fn flip_h(mut self) -> Self {
+        self.orientation = self.orientation.compose(Orientation::FLIP_H);
+        self
+    }
+
+    /// Flip vertically. Stacks with EXIF and other orientation commands.
+    pub fn flip_v(mut self) -> Self {
+        self.orientation = self.orientation.compose(Orientation::FLIP_V);
+        self
+    }
+
+    /// Crop to pixel coordinates in post-orientation space.
+    pub fn crop_pixels(mut self, x: u32, y: u32, width: u32, height: u32) -> Self {
+        if self.crop.is_none() {
+            self.crop = Some(SourceCrop::pixels(x, y, width, height));
+        }
+        self
+    }
+
+    /// Crop using percentage coordinates (0.0–1.0) in post-orientation space.
+    pub fn crop_percent(mut self, x: f32, y: f32, width: f32, height: f32) -> Self {
+        if self.crop.is_none() {
+            self.crop = Some(SourceCrop::percent(x, y, width, height));
+        }
+        self
+    }
+
+    /// Crop with a pre-built [`SourceCrop`].
+    pub fn crop(mut self, source_crop: SourceCrop) -> Self {
+        if self.crop.is_none() {
+            self.crop = Some(source_crop);
+        }
+        self
+    }
+
+    /// Fit within target dimensions, preserving aspect ratio. May upscale.
+    pub fn fit(self, width: u32, height: u32) -> Self {
+        self.constrain(Constraint::new(ConstraintMode::Fit, width, height))
+    }
+
+    /// Fit within target dimensions, never upscaling.
+    pub fn within(self, width: u32, height: u32) -> Self {
+        self.constrain(Constraint::new(ConstraintMode::Within, width, height))
+    }
+
+    /// Scale to fill target, cropping overflow. Preserves aspect ratio.
+    pub fn fit_crop(self, width: u32, height: u32) -> Self {
+        self.constrain(Constraint::new(ConstraintMode::FitCrop, width, height))
+    }
+
+    /// Like [`fit_crop`](Self::fit_crop), but never upscales.
+    pub fn within_crop(self, width: u32, height: u32) -> Self {
+        self.constrain(Constraint::new(ConstraintMode::WithinCrop, width, height))
+    }
+
+    /// Fit within target, padding to exact target dimensions.
+    pub fn fit_pad(self, width: u32, height: u32) -> Self {
+        self.constrain(Constraint::new(ConstraintMode::FitPad, width, height))
+    }
+
+    /// Like [`fit_pad`](Self::fit_pad), but never upscales.
+    pub fn within_pad(self, width: u32, height: u32) -> Self {
+        self.constrain(Constraint::new(ConstraintMode::WithinPad, width, height))
+    }
+
+    /// Scale to exact target dimensions, distorting aspect ratio.
+    pub fn distort(self, width: u32, height: u32) -> Self {
+        self.constrain(Constraint::new(ConstraintMode::Distort, width, height))
+    }
+
+    /// Crop to target aspect ratio without scaling.
+    pub fn aspect_crop(self, width: u32, height: u32) -> Self {
+        self.constrain(Constraint::new(ConstraintMode::AspectCrop, width, height))
+    }
+
+    /// Apply a pre-built [`Constraint`] for advanced cases (gravity, canvas color, single-axis).
+    pub fn constrain(mut self, constraint: Constraint) -> Self {
+        if self.constraint.is_none() {
+            self.constraint = Some(constraint);
+        }
+        self
+    }
+
+    /// Add uniform padding on all sides.
+    pub fn pad_uniform(self, amount: u32, color: CanvasColor) -> Self {
+        self.pad(amount, amount, amount, amount, color)
+    }
+
+    /// Add padding around the image.
+    pub fn pad(mut self, top: u32, right: u32, bottom: u32, left: u32, color: CanvasColor) -> Self {
+        if self.padding.is_none() {
+            self.padding = Some(Padding {
+                top,
+                right,
+                bottom,
+                left,
+                color,
+            });
+        }
+        self
+    }
+
+    /// Compute the ideal layout and decoder request.
+    ///
+    /// This is phase 1 of the two-phase layout process. Pass the returned
+    /// [`DecoderRequest`] to the decoder, then call [`IdealLayout::finalize()`]
+    /// with the decoder's [`DecoderOffer`].
+    pub fn plan(self) -> Result<(IdealLayout, DecoderRequest), LayoutError> {
+        plan_from_parts(
+            self.source_w,
+            self.source_h,
+            self.orientation,
+            self.crop.as_ref(),
+            self.constraint.as_ref(),
+            self.padding,
+        )
+    }
+}
+
+impl IdealLayout {
+    /// Finalize layout after decoder reports what it actually did.
+    ///
+    /// Convenience method — equivalent to calling [`finalize()`].
+    pub fn finalize(&self, request: &DecoderRequest, offer: &DecoderOffer) -> LayoutPlan {
+        finalize(self, request, offer)
+    }
+}
+
 /// Compute ideal layout from commands and source image dimensions.
 ///
 /// Orientation commands (AutoOrient, Rotate, Flip) are composed into a single
@@ -148,16 +350,13 @@ pub struct LayoutPlan {
 /// back to pre-orientation source coordinates for the decoder.
 ///
 /// Only the first `Crop` and first `Constrain` command are used; duplicates are ignored.
+///
+/// For a friendlier API, see [`Pipeline`].
 pub fn plan(
     commands: &[Command],
     source_w: u32,
     source_h: u32,
 ) -> Result<(IdealLayout, DecoderRequest), LayoutError> {
-    if source_w == 0 || source_h == 0 {
-        return Err(LayoutError::ZeroSourceDimension);
-    }
-
-    // 1. Compose all orientation commands into a net orientation.
     let mut orientation = Orientation::IDENTITY;
     let mut crop: Option<&SourceCrop> = None;
     let mut constraint: Option<&Constraint> = None;
@@ -215,19 +414,33 @@ pub fn plan(
         }
     }
 
-    // 2. Transform source dimensions to post-orientation space.
+    plan_from_parts(source_w, source_h, orientation, crop, constraint, padding)
+}
+
+/// Core layout computation shared by [`plan()`] and [`Pipeline::plan()`].
+fn plan_from_parts(
+    source_w: u32,
+    source_h: u32,
+    orientation: Orientation,
+    crop: Option<&SourceCrop>,
+    constraint: Option<&Constraint>,
+    padding: Option<Padding>,
+) -> Result<(IdealLayout, DecoderRequest), LayoutError> {
+    if source_w == 0 || source_h == 0 {
+        return Err(LayoutError::ZeroSourceDimension);
+    }
+
+    // 1. Transform source dimensions to post-orientation space.
     let (ow, oh) = orientation.transform_dimensions(source_w, source_h);
 
-    // 3. Compute layout in post-orientation space.
+    // 2. Compute layout in post-orientation space.
     let layout = if let Some(c) = constraint {
-        // Merge any explicit crop into the constraint.
         let mut builder = c.clone();
         if let Some(sc) = crop {
             builder = builder.source_crop(*sc);
         }
         builder.compute(ow, oh)?
     } else if let Some(sc) = crop {
-        // Crop only, no constraint — resolve crop rect, no resize.
         let rect = sc.resolve(ow, oh);
         Layout {
             source: (ow, oh),
@@ -238,7 +451,6 @@ pub fn plan(
             canvas_color: CanvasColor::default(),
         }
     } else {
-        // No constraint, no crop — passthrough.
         Layout {
             source: (ow, oh),
             source_crop: None,
@@ -249,13 +461,11 @@ pub fn plan(
         }
     };
 
-    // 4. Apply explicit padding if present.
+    // 3. Apply explicit padding if present.
     let layout = if let Some(pad) = &padding {
         let (rw, rh) = layout.resize_to;
-        let cw = rw + pad.left + pad.right;
-        let ch = rh + pad.top + pad.bottom;
         Layout {
-            canvas: (cw, ch),
+            canvas: (rw + pad.left + pad.right, rh + pad.top + pad.bottom),
             placement: (pad.left, pad.top),
             canvas_color: pad.color,
             ..layout
@@ -264,8 +474,7 @@ pub fn plan(
         layout
     };
 
-    // 5. Transform the source crop from post-orientation space back to
-    //    pre-orientation source coordinates.
+    // 4. Transform source crop back to pre-orientation source coordinates.
     let source_crop_in_source = layout
         .source_crop
         .map(|r| orientation.transform_rect_to_source(r, source_w, source_h));
@@ -366,7 +575,6 @@ fn compute_trim(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constraint::ConstraintMode;
 
     // ── No commands ──────────────────────────────────────────────────────
 
@@ -1527,5 +1735,233 @@ mod tests {
         assert_eq!(lp.canvas, (400, 400));
         assert_eq!(lp.placement, (0, 100));
         assert!(!lp.resize_is_identity);
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Pipeline builder API
+    // ════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn pipeline_basic_fit() {
+        let (ideal, _) = Pipeline::new(800, 600).fit(400, 300).plan().unwrap();
+        assert_eq!(ideal.layout.resize_to, (400, 300));
+    }
+
+    #[test]
+    fn pipeline_within() {
+        let (ideal, _) = Pipeline::new(200, 100).within(400, 300).plan().unwrap();
+        // Source smaller than target → no upscale
+        assert_eq!(ideal.layout.resize_to, (200, 100));
+    }
+
+    #[test]
+    fn pipeline_orient_then_fit() {
+        let (ideal, _) = Pipeline::new(800, 600)
+            .auto_orient(6) // Rotate90
+            .fit(300, 300)
+            .plan()
+            .unwrap();
+        // 800×600 → oriented 600×800 → fit 300×300 → 225×300
+        assert_eq!(ideal.layout.resize_to, (225, 300));
+    }
+
+    #[test]
+    fn pipeline_matches_command_api() {
+        // Same operation via both APIs should produce identical results
+        let commands = [
+            Command::AutoOrient(6),
+            Command::Crop(SourceCrop::pixels(50, 50, 400, 600)),
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 200, 200),
+            },
+        ];
+        let (ideal_cmd, req_cmd) = plan(&commands, 800, 600).unwrap();
+
+        let (ideal_pipe, req_pipe) = Pipeline::new(800, 600)
+            .auto_orient(6)
+            .crop_pixels(50, 50, 400, 600)
+            .fit(200, 200)
+            .plan()
+            .unwrap();
+
+        assert_eq!(ideal_cmd.orientation, ideal_pipe.orientation);
+        assert_eq!(ideal_cmd.layout, ideal_pipe.layout);
+        assert_eq!(ideal_cmd.source_crop, ideal_pipe.source_crop);
+        assert_eq!(req_cmd, req_pipe);
+    }
+
+    #[test]
+    fn pipeline_stacked_rotations() {
+        let (ideal, _) = Pipeline::new(800, 600)
+            .auto_orient(6) // Rotate90
+            .rotate_90() // +90 = 180 total
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.orientation, Orientation::ROTATE_180);
+        assert_eq!(ideal.layout.resize_to, (800, 600));
+    }
+
+    #[test]
+    fn pipeline_flip_h_and_v() {
+        let (ideal, _) = Pipeline::new(800, 600).flip_h().flip_v().plan().unwrap();
+        // FlipH then FlipV = Rotate180
+        assert_eq!(ideal.orientation, Orientation::ROTATE_180);
+    }
+
+    #[test]
+    fn pipeline_crop_percent() {
+        let (ideal, _) = Pipeline::new(1000, 1000)
+            .crop_percent(0.1, 0.1, 0.8, 0.8)
+            .plan()
+            .unwrap();
+        let crop = ideal.layout.source_crop.unwrap();
+        assert_eq!(crop, Rect::new(100, 100, 800, 800));
+    }
+
+    #[test]
+    fn pipeline_fit_crop() {
+        let (ideal, _) = Pipeline::new(1000, 500).fit_crop(400, 400).plan().unwrap();
+        assert_eq!(ideal.layout.resize_to, (400, 400));
+        assert!(ideal.layout.source_crop.is_some());
+    }
+
+    #[test]
+    fn pipeline_fit_pad() {
+        let (ideal, _) = Pipeline::new(1000, 500).fit_pad(400, 400).plan().unwrap();
+        assert_eq!(ideal.layout.resize_to, (400, 200));
+        assert_eq!(ideal.layout.canvas, (400, 400));
+    }
+
+    #[test]
+    fn pipeline_distort() {
+        let (ideal, _) = Pipeline::new(800, 600).distort(100, 100).plan().unwrap();
+        assert_eq!(ideal.layout.resize_to, (100, 100));
+    }
+
+    #[test]
+    fn pipeline_aspect_crop() {
+        let (ideal, _) = Pipeline::new(1000, 500)
+            .aspect_crop(400, 400)
+            .plan()
+            .unwrap();
+        // Crop to 1:1 aspect, no scaling
+        let crop = ideal.layout.source_crop.unwrap();
+        assert_eq!(crop.width, crop.height);
+        assert_eq!(ideal.layout.resize_to, (crop.width, crop.height));
+    }
+
+    #[test]
+    fn pipeline_pad_uniform() {
+        let (ideal, _) = Pipeline::new(400, 300)
+            .pad_uniform(10, CanvasColor::white())
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.resize_to, (400, 300));
+        assert_eq!(ideal.layout.canvas, (420, 320));
+    }
+
+    #[test]
+    fn pipeline_pad_asymmetric() {
+        let (ideal, _) = Pipeline::new(400, 300)
+            .pad(5, 10, 15, 20, CanvasColor::black())
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas, (430, 320)); // 400+10+20, 300+5+15
+        assert_eq!(ideal.layout.placement, (20, 5));
+    }
+
+    #[test]
+    fn pipeline_constrain_with_gravity() {
+        let (ideal, _) = Pipeline::new(1000, 500)
+            .constrain(
+                Constraint::new(ConstraintMode::FitPad, 400, 400)
+                    .gravity(Gravity::Percentage(0.0, 0.0))
+                    .canvas_color(CanvasColor::white()),
+            )
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.resize_to, (400, 200));
+        assert_eq!(ideal.layout.canvas, (400, 400));
+        assert_eq!(ideal.layout.placement, (0, 0)); // top-left gravity
+    }
+
+    #[test]
+    fn pipeline_full_roundtrip() {
+        // End-to-end: build pipeline, plan, finalize with full_decode
+        let (ideal, req) = Pipeline::new(4000, 3000)
+            .auto_orient(6)
+            .crop_pixels(100, 100, 2000, 2500)
+            .within(800, 800)
+            .pad_uniform(5, CanvasColor::black())
+            .plan()
+            .unwrap();
+
+        let lp = ideal.finalize(&req, &DecoderOffer::full_decode(4000, 3000));
+        assert_eq!(lp.remaining_orientation, Orientation::ROTATE_90);
+        assert!(lp.trim.is_some());
+        assert!(!lp.resize_is_identity);
+        // Canvas should be resize_to + 10 each dim
+        assert_eq!(lp.canvas.0, lp.resize_to.0 + 10);
+        assert_eq!(lp.canvas.1, lp.resize_to.1 + 10);
+    }
+
+    #[test]
+    fn pipeline_zero_source_rejected() {
+        assert!(Pipeline::new(0, 600).fit(100, 100).plan().is_err());
+        assert!(Pipeline::new(800, 0).fit(100, 100).plan().is_err());
+    }
+
+    #[test]
+    fn pipeline_first_constraint_wins() {
+        let (ideal, _) = Pipeline::new(800, 600)
+            .fit(200, 200)
+            .within(100, 100) // ignored
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.resize_to, (200, 150));
+    }
+
+    #[test]
+    fn pipeline_first_crop_wins() {
+        let (ideal, _) = Pipeline::new(800, 600)
+            .crop_pixels(0, 0, 100, 100)
+            .crop_pixels(200, 200, 50, 50) // ignored
+            .plan()
+            .unwrap();
+        let crop = ideal.source_crop.unwrap();
+        assert_eq!(crop, Rect::new(0, 0, 100, 100));
+    }
+
+    #[test]
+    fn pipeline_within_crop() {
+        let (ideal, _) = Pipeline::new(1000, 500)
+            .within_crop(400, 400)
+            .plan()
+            .unwrap();
+        // Source larger → crop to aspect + downscale
+        assert_eq!(ideal.layout.resize_to, (400, 400));
+        assert!(ideal.layout.source_crop.is_some());
+    }
+
+    #[test]
+    fn pipeline_within_pad() {
+        let (ideal, _) = Pipeline::new(200, 100).within_pad(400, 300).plan().unwrap();
+        // Source fits within target → identity (imageflow behavior)
+        assert_eq!(ideal.layout.resize_to, (200, 100));
+        assert_eq!(ideal.layout.canvas, (200, 100));
+    }
+
+    #[test]
+    fn pipeline_rotate_270() {
+        let (ideal, _) = Pipeline::new(800, 600).rotate_270().plan().unwrap();
+        assert_eq!(ideal.orientation, Orientation::ROTATE_270);
+        assert_eq!(ideal.layout.resize_to, (600, 800));
+    }
+
+    #[test]
+    fn pipeline_rotate_180() {
+        let (ideal, _) = Pipeline::new(800, 600).rotate_180().plan().unwrap();
+        assert_eq!(ideal.orientation, Orientation::ROTATE_180);
+        assert_eq!(ideal.layout.resize_to, (800, 600));
     }
 }
