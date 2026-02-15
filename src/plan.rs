@@ -144,10 +144,10 @@ pub struct LayoutPlan {
 
 /// Post-computation safety limits applied after all layout computation.
 ///
-/// These are **not** the primary constraint — they're guardrails:
-/// - `max`: prevents absurdly large outputs (security). Aspect-preserving downscale.
-/// - `min`: prevents degenerate tiny outputs. Aspect-preserving upscale.
-/// - `align`: snaps resize dimensions to codec-required multiples (JPEG MCU, video mod-2).
+/// All limits target the **canvas** (the encoded output dimensions):
+/// - `max`: prevents absurdly large outputs (security). Proportional downscale.
+/// - `min`: prevents degenerate tiny outputs. Proportional upscale.
+/// - `align`: snaps canvas to codec-required multiples (JPEG MCU, video mod-2).
 ///
 /// If `max` and `min` conflict, `max` wins (security trumps aesthetics).
 ///
@@ -157,16 +157,16 @@ pub struct LayoutPlan {
 pub struct MandatoryConstraints {
     /// Maximum canvas dimensions. If exceeded, everything scales down proportionally.
     pub max: Option<(u32, u32)>,
-    /// Minimum resize dimensions. If below, resize_to scales up proportionally.
+    /// Minimum canvas dimensions. If below, everything scales up proportionally.
     pub min: Option<(u32, u32)>,
-    /// Snap resize_to to multiples of this value (rounds down, minimum 1×align).
+    /// Snap canvas to multiples of this value (rounds down, minimum 1×align).
     pub align: Option<u32>,
 }
 
 impl MandatoryConstraints {
     /// Apply limits to a computed layout, returning a modified layout.
     ///
-    /// Order: max (cap canvas) → min (floor resize) → align (snap resize).
+    /// Order: max (cap canvas) → min (floor canvas) → align (snap canvas).
     /// Max wins if min conflicts.
     pub fn apply(&self, layout: Layout) -> Layout {
         let mut layout = layout;
@@ -178,46 +178,21 @@ impl MandatoryConstraints {
                     max_w as f64 / layout.canvas.0 as f64,
                     max_h as f64 / layout.canvas.1 as f64,
                 );
-                layout.resize_to = (
-                    (layout.resize_to.0 as f64 * scale).round().max(1.0) as u32,
-                    (layout.resize_to.1 as f64 * scale).round().max(1.0) as u32,
-                );
-                layout.canvas = (
-                    (layout.canvas.0 as f64 * scale).round().max(1.0) as u32,
-                    (layout.canvas.1 as f64 * scale).round().max(1.0) as u32,
-                );
-                layout.placement = (
-                    (layout.placement.0 as f64 * scale).round() as u32,
-                    (layout.placement.1 as f64 * scale).round() as u32,
-                );
+                Self::scale_layout(&mut layout, scale);
             }
         }
 
-        // 2. Min: if resize_to is below min, scale up proportionally.
+        // 2. Min: if canvas is below min, scale everything up proportionally.
         if let Some((min_w, min_h)) = self.min {
             if min_w > 0
                 && min_h > 0
-                && (layout.resize_to.0 < min_w || layout.resize_to.1 < min_h)
+                && (layout.canvas.0 < min_w || layout.canvas.1 < min_h)
             {
                 let scale = f64::max(
-                    min_w as f64 / layout.resize_to.0 as f64,
-                    min_h as f64 / layout.resize_to.1 as f64,
+                    min_w as f64 / layout.canvas.0 as f64,
+                    min_h as f64 / layout.canvas.1 as f64,
                 );
-                let new_rw = (layout.resize_to.0 as f64 * scale).round().max(1.0) as u32;
-                let new_rh = (layout.resize_to.1 as f64 * scale).round().max(1.0) as u32;
-                layout.resize_to = (new_rw, new_rh);
-
-                // Canvas must contain resize_to. If pad mode (canvas > resize_to
-                // before min), scale canvas proportionally. If canvas < resize_to
-                // after scaling, grow to match.
-                layout.canvas = (
-                    (layout.canvas.0 as f64 * scale).round().max(new_rw as f64) as u32,
-                    (layout.canvas.1 as f64 * scale).round().max(new_rh as f64) as u32,
-                );
-                layout.placement = (
-                    (layout.placement.0 as f64 * scale).round() as u32,
-                    (layout.placement.1 as f64 * scale).round() as u32,
-                );
+                Self::scale_layout(&mut layout, scale);
 
                 // Re-apply max if min pushed us past it (max wins).
                 if let Some((max_w, max_h)) = self.max {
@@ -229,49 +204,50 @@ impl MandatoryConstraints {
                             max_w as f64 / layout.canvas.0 as f64,
                             max_h as f64 / layout.canvas.1 as f64,
                         );
-                        layout.resize_to = (
-                            (layout.resize_to.0 as f64 * clamp).round().max(1.0) as u32,
-                            (layout.resize_to.1 as f64 * clamp).round().max(1.0) as u32,
-                        );
-                        layout.canvas = (
-                            (layout.canvas.0 as f64 * clamp).round().max(1.0) as u32,
-                            (layout.canvas.1 as f64 * clamp).round().max(1.0) as u32,
-                        );
-                        layout.placement = (
-                            (layout.placement.0 as f64 * clamp).round() as u32,
-                            (layout.placement.1 as f64 * clamp).round() as u32,
-                        );
+                        Self::scale_layout(&mut layout, clamp);
                     }
                 }
             }
         }
 
-        // 3. Align: snap resize_to down to multiples.
+        // 3. Align: snap canvas down to multiples.
         if let Some(align) = self.align {
             if align > 1 {
-                let rw = (layout.resize_to.0 / align).max(1) * align;
-                let rh = (layout.resize_to.1 / align).max(1) * align;
-                layout.resize_to = (rw, rh);
+                let cw = (layout.canvas.0 / align).max(1) * align;
+                let ch = (layout.canvas.1 / align).max(1) * align;
+                layout.canvas = (cw, ch);
 
-                // For non-pad layouts (canvas == old resize_to), snap canvas too.
-                // For pad layouts, recenter placement.
-                if layout.canvas.0 <= layout.resize_to.0 {
-                    layout.canvas.0 = layout.resize_to.0;
-                    layout.placement.0 = 0;
-                } else {
-                    // Recenter within existing canvas.
-                    layout.placement.0 = (layout.canvas.0 - rw) / 2;
-                }
-                if layout.canvas.1 <= layout.resize_to.1 {
-                    layout.canvas.1 = layout.resize_to.1;
-                    layout.placement.1 = 0;
-                } else {
-                    layout.placement.1 = (layout.canvas.1 - rh) / 2;
-                }
+                // resize_to can't exceed canvas.
+                layout.resize_to = (
+                    layout.resize_to.0.min(cw),
+                    layout.resize_to.1.min(ch),
+                );
+
+                // Clamp placement so image fits within canvas.
+                layout.placement = (
+                    layout.placement.0.min(cw.saturating_sub(layout.resize_to.0)),
+                    layout.placement.1.min(ch.saturating_sub(layout.resize_to.1)),
+                );
             }
         }
 
         layout
+    }
+
+    /// Scale all layout dimensions by a factor.
+    fn scale_layout(layout: &mut Layout, scale: f64) {
+        layout.resize_to = (
+            (layout.resize_to.0 as f64 * scale).round().max(1.0) as u32,
+            (layout.resize_to.1 as f64 * scale).round().max(1.0) as u32,
+        );
+        layout.canvas = (
+            (layout.canvas.0 as f64 * scale).round().max(1.0) as u32,
+            (layout.canvas.1 as f64 * scale).round().max(1.0) as u32,
+        );
+        layout.placement = (
+            (layout.placement.0 as f64 * scale).round() as u32,
+            (layout.placement.1 as f64 * scale).round() as u32,
+        );
     }
 }
 
@@ -2794,7 +2770,7 @@ mod tests {
     #[test]
     fn limits_align_preserves_padded_canvas() {
         // FitPad(400, 400) on 800×600 → resize_to=(400,300), canvas=(400,400)
-        // Align 16 → resize_to=(400, 288). canvas stays 400×400, recentered.
+        // Align 16: canvas already 400×400 (mod 16). No change.
         let (ideal, _) = Pipeline::new(800, 600)
             .fit_pad(400, 400)
             .limits(MandatoryConstraints {
@@ -2803,12 +2779,29 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.resize_to.0, 400); // already aligned
-        assert_eq!(ideal.layout.resize_to.1 % 16, 0);
-        assert_eq!(ideal.layout.canvas, (400, 400)); // canvas unchanged
-        // Recentered
-        let expected_y = (400 - ideal.layout.resize_to.1) / 2;
-        assert_eq!(ideal.layout.placement.1, expected_y);
+        assert_eq!(ideal.layout.canvas.0 % 16, 0);
+        assert_eq!(ideal.layout.canvas.1 % 16, 0);
+        assert_eq!(ideal.layout.canvas, (400, 400));
+        assert_eq!(ideal.layout.resize_to, (400, 300)); // unchanged
+    }
+
+    #[test]
+    fn limits_align_snaps_padded_canvas() {
+        // FitPad(401, 401) on 800×600 → resize_to=(401,301), canvas=(401,401)
+        // Align 16: canvas → 400×400, resize_to stays 401→clamped to 400, 301 stays
+        let (ideal, _) = Pipeline::new(800, 600)
+            .fit_pad(401, 401)
+            .limits(MandatoryConstraints {
+                align: Some(16),
+                ..Default::default()
+            })
+            .plan()
+            .unwrap();
+        assert_eq!(ideal.layout.canvas.0 % 16, 0);
+        assert_eq!(ideal.layout.canvas.1 % 16, 0);
+        // resize_to clamped to canvas
+        assert!(ideal.layout.resize_to.0 <= ideal.layout.canvas.0);
+        assert!(ideal.layout.resize_to.1 <= ideal.layout.canvas.1);
     }
 
     #[test]
@@ -2840,11 +2833,11 @@ mod tests {
         // Max caps to 1080×1080 (square, height constrains)
         assert!(ideal.layout.canvas.0 <= 1920);
         assert!(ideal.layout.canvas.1 <= 1080);
-        // Align snaps
-        assert_eq!(ideal.layout.resize_to.0 % 8, 0);
-        assert_eq!(ideal.layout.resize_to.1 % 8, 0);
+        // Align snaps canvas
+        assert_eq!(ideal.layout.canvas.0 % 8, 0);
+        assert_eq!(ideal.layout.canvas.1 % 8, 0);
         // Min satisfied (1080 > 100)
-        assert!(ideal.layout.resize_to.0 >= 100);
+        assert!(ideal.layout.canvas.0 >= 100);
     }
 
     #[test]
@@ -2878,7 +2871,7 @@ mod tests {
 
     #[test]
     fn limits_tiny_image_align_doesnt_zero() {
-        // 3×3 image, align 16 → should get at least 16×16, not 0×0
+        // 3×3 image, align 16 → canvas snaps to 16×16, resize_to stays 3×3
         let (ideal, _) = Pipeline::new(3, 3)
             .fit(3, 3)
             .limits(MandatoryConstraints {
@@ -2887,8 +2880,8 @@ mod tests {
             })
             .plan()
             .unwrap();
-        assert!(ideal.layout.resize_to.0 >= 16);
-        assert!(ideal.layout.resize_to.1 >= 16);
+        assert_eq!(ideal.layout.canvas, (16, 16));
+        assert_eq!(ideal.layout.resize_to, (3, 3));
     }
 
     // ── CanvasColor::Linear ─────────────────────────────────────────────
