@@ -744,6 +744,8 @@ pub struct Pipeline {
     constraint: Option<Constraint>,
     padding: Option<Padding>,
     limits: Option<OutputLimits>,
+    /// Ordered command list for sequential evaluation mode.
+    commands: Vec<Command>,
 }
 
 impl Pipeline {
@@ -758,6 +760,7 @@ impl Pipeline {
             constraint: None,
             padding: None,
             limits: None,
+            commands: Vec::new(),
         }
     }
 
@@ -766,57 +769,68 @@ impl Pipeline {
         if let Some(o) = Orientation::from_exif(exif) {
             self.orientation = self.orientation.compose(o);
         }
+        self.commands.push(Command::AutoOrient(exif));
         self
     }
 
     /// Rotate 90 degrees clockwise. Stacks with EXIF and other rotations.
     pub fn rotate_90(mut self) -> Self {
         self.orientation = self.orientation.compose(Orientation::Rotate90);
+        self.commands.push(Command::Rotate(Rotation::Rotate90));
         self
     }
 
     /// Rotate 180 degrees. Stacks with EXIF and other rotations.
     pub fn rotate_180(mut self) -> Self {
         self.orientation = self.orientation.compose(Orientation::Rotate180);
+        self.commands.push(Command::Rotate(Rotation::Rotate180));
         self
     }
 
     /// Rotate 270 degrees clockwise. Stacks with EXIF and other rotations.
     pub fn rotate_270(mut self) -> Self {
         self.orientation = self.orientation.compose(Orientation::Rotate270);
+        self.commands.push(Command::Rotate(Rotation::Rotate270));
         self
     }
 
     /// Flip horizontally. Stacks with EXIF and other orientation commands.
     pub fn flip_h(mut self) -> Self {
         self.orientation = self.orientation.compose(Orientation::FlipH);
+        self.commands.push(Command::Flip(FlipAxis::Horizontal));
         self
     }
 
     /// Flip vertically. Stacks with EXIF and other orientation commands.
     pub fn flip_v(mut self) -> Self {
         self.orientation = self.orientation.compose(Orientation::FlipV);
+        self.commands.push(Command::Flip(FlipAxis::Vertical));
         self
     }
 
     /// Crop to pixel coordinates in post-orientation space.
     pub fn crop_pixels(mut self, x: u32, y: u32, width: u32, height: u32) -> Self {
+        let sc = SourceCrop::pixels(x, y, width, height);
+        self.commands.push(Command::Crop(sc));
         if self.crop.is_none() {
-            self.crop = Some(SourceCrop::pixels(x, y, width, height));
+            self.crop = Some(sc);
         }
         self
     }
 
     /// Crop using percentage coordinates (0.0–1.0) in post-orientation space.
     pub fn crop_percent(mut self, x: f32, y: f32, width: f32, height: f32) -> Self {
+        let sc = SourceCrop::percent(x, y, width, height);
+        self.commands.push(Command::Crop(sc));
         if self.crop.is_none() {
-            self.crop = Some(SourceCrop::percent(x, y, width, height));
+            self.crop = Some(sc);
         }
         self
     }
 
     /// Crop with a pre-built [`SourceCrop`].
     pub fn crop(mut self, source_crop: SourceCrop) -> Self {
+        self.commands.push(Command::Crop(source_crop));
         if self.crop.is_none() {
             self.crop = Some(source_crop);
         }
@@ -828,6 +842,7 @@ impl Pipeline {
     /// Occupies the crop/region slot (first one wins in fixed mode).
     /// If a crop was already set, this is ignored.
     pub fn region(mut self, region: Region) -> Self {
+        self.commands.push(Command::Region(region));
         if self.crop.is_none() && self.region.is_none() {
             self.region = Some(region);
         }
@@ -904,6 +919,9 @@ impl Pipeline {
 
     /// Apply a pre-built [`Constraint`] for advanced cases (gravity, canvas color, single-axis).
     pub fn constrain(mut self, constraint: Constraint) -> Self {
+        self.commands.push(Command::Constrain {
+            constraint: constraint.clone(),
+        });
         if self.constraint.is_none() {
             self.constraint = Some(constraint);
         }
@@ -917,6 +935,13 @@ impl Pipeline {
 
     /// Add padding around the image.
     pub fn pad(mut self, top: u32, right: u32, bottom: u32, left: u32, color: CanvasColor) -> Self {
+        self.commands.push(Command::Pad {
+            top,
+            right,
+            bottom,
+            left,
+            color,
+        });
         if self.padding.is_none() {
             self.padding = Some(Padding {
                 top,
@@ -937,11 +962,10 @@ impl Pipeline {
         self
     }
 
-    /// Compute the ideal layout and decoder request.
+    /// Compute the ideal layout and decoder request (fixed pipeline mode).
     ///
-    /// This is phase 1 of the two-phase layout process. Pass the returned
-    /// [`DecoderRequest`] to the decoder, then call [`IdealLayout::finalize()`]
-    /// with the decoder's [`DecoderOffer`].
+    /// Uses fixed-pipeline semantics: first-wins for crop/region/constrain/pad.
+    /// For sequential evaluation, use [`plan_sequential()`](Self::plan_sequential).
     pub fn plan(self) -> Result<(IdealLayout, DecoderRequest), LayoutError> {
         plan_from_parts(
             self.source_w,
@@ -951,6 +975,21 @@ impl Pipeline {
             self.region,
             self.constraint.as_ref(),
             self.padding,
+            self.limits.as_ref(),
+        )
+    }
+
+    /// Compute the ideal layout with sequential evaluation.
+    ///
+    /// Unlike [`plan()`](Self::plan) which uses fixed-pipeline semantics (first-wins),
+    /// this processes commands in order. Orientations always fuse. Crop/region
+    /// commands compose sequentially. Last constraint wins. Post-constraint
+    /// crop/pad adjusts the output canvas.
+    pub fn plan_sequential(self) -> Result<(IdealLayout, DecoderRequest), LayoutError> {
+        compute_layout_sequential(
+            &self.commands,
+            self.source_w,
+            self.source_h,
             self.limits.as_ref(),
         )
     }
@@ -1210,6 +1249,238 @@ pub fn compute_layout(
         padding,
         limits,
     )
+}
+
+/// Compute layout from command sequence with sequential evaluation.
+///
+/// Unlike [`compute_layout()`] which uses fixed-pipeline semantics (first-wins),
+/// this processes commands in order:
+/// - Orientations always fuse (compose algebraically) regardless of position
+/// - Crop/region commands before the first constraint compose sequentially
+/// - Last constraint wins
+/// - Post-constraint crop/region/pad adjusts the output canvas
+/// - Limits are applied once at the end
+///
+/// For a friendlier API, see [`Pipeline::plan_sequential()`].
+pub fn compute_layout_sequential(
+    commands: &[Command],
+    source_w: u32,
+    source_h: u32,
+    limits: Option<&OutputLimits>,
+) -> Result<(IdealLayout, DecoderRequest), LayoutError> {
+    // Phase 1: Partition commands into pre-constrain and post-constrain groups.
+    let mut orientation = Orientation::Identity;
+    let mut pre_regions: Vec<Region> = Vec::new();
+    let mut constraint: Option<&Constraint> = None;
+    let mut post_ops: Vec<&Command> = Vec::new();
+    let mut saw_constrain = false;
+
+    for cmd in commands {
+        match cmd {
+            Command::AutoOrient(exif) => {
+                if let Some(o) = Orientation::from_exif(*exif) {
+                    orientation = orientation.compose(o);
+                }
+            }
+            Command::Rotate(r) => {
+                let o = match r {
+                    Rotation::Rotate90 => Orientation::Rotate90,
+                    Rotation::Rotate180 => Orientation::Rotate180,
+                    Rotation::Rotate270 => Orientation::Rotate270,
+                };
+                orientation = orientation.compose(o);
+            }
+            Command::Flip(axis) => {
+                let o = match axis {
+                    FlipAxis::Horizontal => Orientation::FlipH,
+                    FlipAxis::Vertical => Orientation::FlipV,
+                };
+                orientation = orientation.compose(o);
+            }
+            Command::Crop(sc) => {
+                if saw_constrain {
+                    post_ops.push(cmd);
+                } else {
+                    pre_regions.push(sc.to_region());
+                }
+            }
+            Command::Region(r) => {
+                if saw_constrain {
+                    post_ops.push(cmd);
+                } else {
+                    pre_regions.push(*r);
+                }
+            }
+            Command::Constrain { constraint: c } => {
+                constraint = Some(c); // last wins
+                saw_constrain = true;
+                post_ops.clear(); // reset post-ops on each new constrain
+            }
+            Command::Pad { .. } => {
+                post_ops.push(cmd);
+            }
+        }
+    }
+
+    if source_w == 0 || source_h == 0 {
+        return Err(LayoutError::ZeroSourceDimension);
+    }
+
+    // Phase 2: Compose pre-constrain regions into a single effective region.
+    let oriented = orientation.transform_dimensions(source_w, source_h);
+    let (ow, oh) = (oriented.width, oriented.height);
+
+    let effective_region = if pre_regions.is_empty() {
+        None
+    } else {
+        // Compose regions sequentially: each region operates on the effective
+        // source from the previous step. The first region operates on the
+        // full oriented source. Subsequent regions treat the previous region's
+        // viewport as their source coordinate system.
+        let mut composed = pre_regions[0];
+        for next in &pre_regions[1..] {
+            composed = compose_regions(composed, *next, ow, oh);
+        }
+        Some(composed)
+    };
+
+    // Phase 3: Compute layout from effective region + constraint.
+    let layout = if let Some(reg) = effective_region {
+        resolve_region(reg, ow, oh, constraint)?
+    } else if let Some(c) = constraint {
+        c.clone().compute(ow, oh)?
+    } else {
+        Layout {
+            source: Size::new(ow, oh),
+            source_crop: None,
+            resize_to: Size::new(ow, oh),
+            canvas: Size::new(ow, oh),
+            placement: (0, 0),
+            canvas_color: CanvasColor::default(),
+        }
+    };
+
+    // Phase 4: Apply post-constrain ops to the canvas.
+    let mut layout = layout;
+    let mut pad_applied = false;
+    for op in &post_ops {
+        match op {
+            Command::Crop(sc) => {
+                // Post-constrain crop: trim the canvas
+                let canvas_crop = sc.resolve(layout.canvas.width, layout.canvas.height);
+                // Adjust placement: content shifts relative to new canvas origin
+                let new_px = layout.placement.0.saturating_sub(canvas_crop.x);
+                let new_py = layout.placement.1.saturating_sub(canvas_crop.y);
+                layout.canvas = Size::new(canvas_crop.width, canvas_crop.height);
+                layout.placement = (new_px, new_py);
+            }
+            Command::Region(r) => {
+                // Post-constrain region: redefine canvas viewport
+                let (left, top, right, bottom) =
+                    r.resolve(layout.canvas.width, layout.canvas.height);
+                let new_cw = right - left;
+                let new_ch = bottom - top;
+                if new_cw > 0 && new_ch > 0 {
+                    let new_px = layout.placement.0 as i32 - left;
+                    let new_py = layout.placement.1 as i32 - top;
+                    layout.canvas = Size::new(new_cw as u32, new_ch as u32);
+                    layout.placement = (new_px.max(0) as u32, new_py.max(0) as u32);
+                    layout.canvas_color = r.color;
+                }
+            }
+            Command::Pad {
+                top,
+                right,
+                bottom,
+                left,
+                color,
+            } => {
+                layout.canvas = Size::new(
+                    layout.canvas.width + left + right,
+                    layout.canvas.height + top + bottom,
+                );
+                layout.placement = (layout.placement.0 + left, layout.placement.1 + top);
+                layout.canvas_color = *color;
+                pad_applied = true;
+            }
+            _ => {} // orient commands already handled
+        }
+    }
+
+    // Build padding record for IdealLayout
+    let padding = if pad_applied {
+        // Find the last pad command
+        post_ops
+            .iter()
+            .rev()
+            .find_map(|op| match op {
+                Command::Pad {
+                    top,
+                    right,
+                    bottom,
+                    left,
+                    color,
+                } => Some(Padding {
+                    top: *top,
+                    right: *right,
+                    bottom: *bottom,
+                    left: *left,
+                    color: *color,
+                }),
+                _ => None,
+            })
+    } else {
+        None
+    };
+
+    // Phase 5: Apply limits.
+    let (layout, content_size) = if let Some(mc) = limits {
+        mc.apply(layout)
+    } else {
+        (layout, None)
+    };
+
+    // Phase 6: Transform source crop back to pre-orientation source coordinates.
+    let source_crop_in_source = layout
+        .source_crop
+        .map(|r| orientation.transform_rect_to_source(r, source_w, source_h));
+
+    let ideal = IdealLayout {
+        orientation,
+        layout: layout.clone(),
+        source_crop: source_crop_in_source,
+        padding,
+        content_size,
+    };
+
+    let request = DecoderRequest {
+        crop: source_crop_in_source,
+        target_size: layout.resize_to,
+        orientation,
+    };
+
+    Ok((ideal, request))
+}
+
+/// Compose two regions: `outer` defines a viewport, `inner` is relative to
+/// that viewport's coordinate system. Result is in the original source coords.
+fn compose_regions(outer: Region, inner: Region, source_w: u32, source_h: u32) -> Region {
+    // Resolve outer to absolute coordinates
+    let (ol, ot, or_, ob) = outer.resolve(source_w, source_h);
+    let ow = (or_ - ol).max(1) as u32;
+    let oh = (ob - ot).max(1) as u32;
+
+    // Resolve inner relative to the outer viewport dimensions
+    let (il, it, ir, ib) = inner.resolve(ow, oh);
+
+    // Transform inner coords back to source space
+    Region {
+        left: RegionCoord::px(ol + il),
+        top: RegionCoord::px(ot + it),
+        right: RegionCoord::px(ol + ir),
+        bottom: RegionCoord::px(ot + ib),
+        color: inner.color,
+    }
 }
 
 /// Core layout computation shared by [`compute_layout()`] and [`Pipeline::plan()`].
@@ -4574,5 +4845,192 @@ mod tests {
             .unwrap();
         assert_eq!(ideal.layout.canvas, Size::new(200, 100));
         assert!(ideal.layout.source_crop.is_none());
+    }
+
+    // ── Sequential mode ────────────────────────────────────────────────
+
+    #[test]
+    fn sequential_orient_fuses() {
+        // Orient commands compose regardless of position
+        let commands = [
+            Command::AutoOrient(6), // Rotate90
+            Command::Crop(SourceCrop::pixels(0, 0, 600, 800)),
+            Command::Rotate(Rotation::Rotate90), // + Rotate90 = Rotate180
+        ];
+        let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
+        assert_eq!(ideal.orientation, Orientation::Rotate180);
+    }
+
+    #[test]
+    fn sequential_matches_fixed_canonical_order() {
+        // When commands are in canonical order with no duplicates,
+        // sequential should match fixed mode
+        let fixed = Pipeline::new(800, 600)
+            .auto_orient(6)
+            .crop_pixels(50, 50, 500, 700)
+            .fit(300, 300)
+            .plan()
+            .unwrap();
+
+        let sequential = Pipeline::new(800, 600)
+            .auto_orient(6)
+            .crop_pixels(50, 50, 500, 700)
+            .fit(300, 300)
+            .plan_sequential()
+            .unwrap();
+
+        assert_eq!(fixed.0.layout.resize_to, sequential.0.layout.resize_to);
+        assert_eq!(fixed.0.layout.canvas, sequential.0.layout.canvas);
+        assert_eq!(fixed.0.orientation, sequential.0.orientation);
+    }
+
+    #[test]
+    fn sequential_multiple_crops_compose() {
+        // Second crop refines the first in sequential mode
+        let commands = [
+            Command::Crop(SourceCrop::pixels(100, 100, 600, 400)), // crop to 600×400
+            Command::Crop(SourceCrop::pixels(50, 50, 500, 300)),   // refine: 50,50 within 600×400
+        ];
+        let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
+        // Second crop is relative to first's viewport (600×400)
+        // Position in source: first starts at (100,100), second at (50,50) within that
+        // → source position (150, 150), size 500×300
+        assert_eq!(ideal.layout.canvas, Size::new(500, 300));
+        let crop = ideal.layout.source_crop.unwrap();
+        assert_eq!(crop.x, 150);
+        assert_eq!(crop.y, 150);
+        assert_eq!(crop.width, 500);
+        assert_eq!(crop.height, 300);
+    }
+
+    #[test]
+    fn sequential_last_constrain_wins() {
+        // In sequential mode, the last constraint wins
+        let commands = [
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 100, 100),
+            },
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 500, 500),
+            },
+        ];
+        let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
+        // Last constraint (500×500) wins: fit 800×600 into 500×500 → 500×375
+        assert_eq!(ideal.layout.resize_to, Size::new(500, 375));
+    }
+
+    #[test]
+    fn sequential_post_constrain_pad() {
+        // Pad after constrain expands the canvas
+        let commands = [
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 400, 300),
+            },
+            Command::Pad {
+                top: 10,
+                right: 10,
+                bottom: 10,
+                left: 10,
+                color: CanvasColor::white(),
+            },
+        ];
+        let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 300));
+        assert_eq!(ideal.layout.canvas, Size::new(420, 320));
+        assert_eq!(ideal.layout.placement, (10, 10));
+    }
+
+    #[test]
+    fn sequential_post_constrain_crop() {
+        // Crop after constrain trims the canvas
+        let commands = [
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 400, 300),
+            },
+            Command::Crop(SourceCrop::pixels(50, 50, 300, 200)),
+        ];
+        let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
+        assert_eq!(ideal.layout.resize_to, Size::new(400, 300));
+        assert_eq!(ideal.layout.canvas, Size::new(300, 200));
+    }
+
+    #[test]
+    fn sequential_crop_constrain_pad_crop() {
+        // crop → constrain → pad → crop (post-constrain trim)
+        let commands = [
+            Command::Crop(SourceCrop::pixels(0, 0, 400, 300)),
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 200, 150),
+            },
+            Command::Pad {
+                top: 20,
+                right: 20,
+                bottom: 20,
+                left: 20,
+                color: CanvasColor::black(),
+            },
+            Command::Crop(SourceCrop::pixels(10, 10, 220, 170)),
+        ];
+        let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
+        // Crop to 400×300, fit to 200×150, pad 20 all sides → 240×190
+        // Post-constrain crop: 10,10,220,170 → canvas=220×170
+        assert_eq!(ideal.layout.canvas, Size::new(220, 170));
+    }
+
+    #[test]
+    fn sequential_with_limits() {
+        let commands = [
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 2000, 2000),
+            },
+        ];
+        let limits = OutputLimits {
+            max: Some(Size::new(500, 500)),
+            ..Default::default()
+        };
+        let (ideal, _) =
+            compute_layout_sequential(&commands, 800, 600, Some(&limits)).unwrap();
+        assert!(ideal.layout.canvas.width <= 500);
+        assert!(ideal.layout.canvas.height <= 500);
+    }
+
+    #[test]
+    fn sequential_empty_commands() {
+        let (ideal, _) = compute_layout_sequential(&[], 800, 600, None).unwrap();
+        assert_eq!(ideal.layout.canvas, Size::new(800, 600));
+        assert_eq!(ideal.layout.resize_to, Size::new(800, 600));
+        assert_eq!(ideal.orientation, Orientation::Identity);
+    }
+
+    #[test]
+    fn sequential_pipeline_method() {
+        let (ideal, _) = Pipeline::new(800, 600)
+            .auto_orient(6)
+            .fit(300, 300)
+            .plan_sequential()
+            .unwrap();
+        assert_eq!(ideal.orientation, Orientation::Rotate90);
+        // 600×800 oriented, fit 300×300 → 225×300
+        assert_eq!(ideal.layout.resize_to, Size::new(225, 300));
+    }
+
+    #[test]
+    fn sequential_post_constrain_region() {
+        // Region after constrain redefines the canvas viewport
+        let commands = [
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 400, 300),
+            },
+            Command::Region(Region {
+                left: RegionCoord::px(-20),
+                top: RegionCoord::px(-20),
+                right: RegionCoord::pct_px(1.0, 20),
+                bottom: RegionCoord::pct_px(1.0, 20),
+                color: CanvasColor::white(),
+            }),
+        ];
+        let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
+        // Canvas should be expanded by 40 in each direction
+        assert_eq!(ideal.layout.canvas, Size::new(440, 340));
     }
 }

@@ -23,5 +23,5 @@ pub use orientation::Orientation;
 pub use plan::{
     Align, CodecLayout, Command, DecoderOffer, DecoderRequest, FlipAxis, IdealLayout, LayoutPlan,
     OutputLimits, Padding, Pipeline, PlaneLayout, Region, RegionCoord, Rotation, Subsampling,
-    compute_layout,
+    compute_layout, compute_layout_sequential,
 };
