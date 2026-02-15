@@ -299,7 +299,7 @@ pub fn finalize(ideal: &IdealLayout, request: &DecoderRequest, offer: &DecoderOf
 
     // 2. Compute trim rect if decoder didn't crop exactly what we asked.
     let (decoder_w, decoder_h) = offer.dimensions;
-    let trim = compute_trim(request, offer, decoder_w, decoder_h);
+    let trim = compute_trim(&request.crop, &offer.crop_applied, decoder_w, decoder_h);
 
     // 3. Dimensions after trimming.
     let (after_trim_w, after_trim_h) = match &trim {
@@ -331,12 +331,12 @@ pub fn finalize(ideal: &IdealLayout, request: &DecoderRequest, offer: &DecoderOf
 
 /// Compute trim rect when decoder crop doesn't exactly match request.
 fn compute_trim(
-    request: &DecoderRequest,
-    offer: &DecoderOffer,
+    requested_crop: &Option<Rect>,
+    applied_crop: &Option<Rect>,
     decoder_w: u32,
     decoder_h: u32,
 ) -> Option<Rect> {
-    match (&request.crop, &offer.crop_applied) {
+    match (requested_crop, applied_crop) {
         // We asked for crop, decoder did nothing → trim the full decode to the requested region.
         (Some(req_crop), None) => Some(*req_crop),
         // We asked for crop, decoder cropped but not exactly → compute offset within decoder output.
@@ -712,5 +712,820 @@ mod tests {
         let (ideal, _) = plan(&commands, 800, 600).unwrap();
         // First constraint wins: Fit to 200×200
         assert_eq!(ideal.layout.resize_to, (200, 150));
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Weird decoder behavior
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Helper: plan + finalize in one step for concise tests.
+    fn plan_finalize(
+        commands: &[Command],
+        source_w: u32,
+        source_h: u32,
+        offer: &DecoderOffer,
+    ) -> (IdealLayout, LayoutPlan) {
+        let (ideal, req) = plan(commands, source_w, source_h).unwrap();
+        let lp = finalize(&ideal, &req, offer);
+        (ideal, lp)
+    }
+
+    // ── Decoder prescaling (JPEG 1/2, 1/4, 1/8) ─────────────────────
+
+    #[test]
+    fn decoder_prescale_half() {
+        // Request: fit 4000×3000 to 500×500, decoder prescales to 2000×1500
+        let commands = [Command::Constrain {
+            constraint: Constraint::new(ConstraintMode::Fit, 500, 500),
+        }];
+        let (ideal, req) = plan(&commands, 4000, 3000).unwrap();
+        assert_eq!(ideal.layout.resize_to, (500, 375));
+
+        let offer = DecoderOffer {
+            dimensions: (2000, 1500),
+            crop_applied: None,
+            orientation_applied: Orientation::IDENTITY,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        assert!(lp.trim.is_none());
+        assert_eq!(lp.resize_to, (500, 375));
+        // 2000×1500 → 500×375: still needs resize
+        assert!(!lp.resize_is_identity);
+    }
+
+    #[test]
+    fn decoder_prescale_to_exact_target() {
+        // JPEG decoder prescales to exactly the target size — no resize needed
+        let commands = [Command::Constrain {
+            constraint: Constraint::new(ConstraintMode::Fit, 500, 375),
+        }];
+        let (ideal, req) = plan(&commands, 4000, 3000).unwrap();
+        let offer = DecoderOffer {
+            dimensions: (500, 375),
+            crop_applied: None,
+            orientation_applied: Orientation::IDENTITY,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+        assert!(lp.resize_is_identity);
+    }
+
+    #[test]
+    fn decoder_prescale_eighth() {
+        // 1/8 prescale: 4000×3000 → 500×375, matches target exactly
+        let commands = [Command::Constrain {
+            constraint: Constraint::new(ConstraintMode::Fit, 500, 500),
+        }];
+        let (_, req) = plan(&commands, 4000, 3000).unwrap();
+        // Decoder only managed 1/8 but dimensions don't match target
+        let offer = DecoderOffer {
+            dimensions: (500, 375),
+            crop_applied: None,
+            orientation_applied: Orientation::IDENTITY,
+        };
+        let (_, lp) = plan_finalize(
+            &[Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 500, 500),
+            }],
+            4000,
+            3000,
+            &offer,
+        );
+        // target is 500×375, decoder output is 500×375 → identity
+        assert!(lp.resize_is_identity);
+        assert_eq!(lp.resize_to, (500, 375));
+        let _ = req; // used above
+    }
+
+    // ── Block-aligned crop overshoot ─────────────────────────────────
+
+    #[test]
+    fn decoder_crop_mcu_aligned_16x16() {
+        // JPEG MCU is 16×16. Request crop at (103,47,200,200).
+        // Decoder aligns to (96,32,224,224).
+        let commands = [Command::Crop(SourceCrop::pixels(103, 47, 200, 200))];
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+        assert_eq!(req.crop.unwrap(), Rect::new(103, 47, 200, 200));
+
+        let offer = DecoderOffer {
+            dimensions: (224, 224),
+            crop_applied: Some(Rect::new(96, 32, 224, 224)),
+            orientation_applied: Orientation::IDENTITY,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        let trim = lp.trim.unwrap();
+        assert_eq!(trim.x, 7); // 103 - 96
+        assert_eq!(trim.y, 15); // 47 - 32
+        assert_eq!(trim.width, 200);
+        assert_eq!(trim.height, 200);
+        assert!(lp.resize_is_identity); // crop-only = no resize
+    }
+
+    #[test]
+    fn decoder_crop_mcu_aligned_8x8() {
+        // 8×8 MCU alignment: request (50,50,100,100), decoder gives (48,48,104,104)
+        let commands = [Command::Crop(SourceCrop::pixels(50, 50, 100, 100))];
+        let (ideal, req) = plan(&commands, 400, 300).unwrap();
+
+        let offer = DecoderOffer {
+            dimensions: (104, 104),
+            crop_applied: Some(Rect::new(48, 48, 104, 104)),
+            orientation_applied: Orientation::IDENTITY,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        let trim = lp.trim.unwrap();
+        assert_eq!(trim, Rect::new(2, 2, 100, 100));
+        assert!(lp.resize_is_identity);
+    }
+
+    #[test]
+    fn decoder_crop_at_image_edge_truncated() {
+        // Request crop near edge: (700,500,200,200) in 800×600.
+        // Decoder crops (696,496,104,104) — truncated at image boundary.
+        let commands = [Command::Crop(SourceCrop::pixels(700, 500, 100, 100))];
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+
+        let offer = DecoderOffer {
+            dimensions: (104, 104),
+            crop_applied: Some(Rect::new(696, 496, 104, 104)),
+            orientation_applied: Orientation::IDENTITY,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        let trim = lp.trim.unwrap();
+        assert_eq!(trim.x, 4); // 700 - 696
+        assert_eq!(trim.y, 4); // 500 - 496
+        assert_eq!(trim.width, 100);
+        assert_eq!(trim.height, 100);
+    }
+
+    // ── Decoder applies wrong orientation ────────────────────────────
+
+    #[test]
+    fn decoder_applies_wrong_orientation() {
+        // We want Rotate90 (EXIF 6), decoder applied Rotate180 instead
+        let commands = [Command::AutoOrient(6)];
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+        assert_eq!(ideal.orientation, Orientation::ROTATE_90);
+
+        let offer = DecoderOffer {
+            dimensions: (800, 600), // 180° doesn't swap
+            crop_applied: None,
+            orientation_applied: Orientation::ROTATE_180,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        // remaining = inverse(180°) ∘ 90° = 180° ∘ 90° = 270°
+        assert_eq!(lp.remaining_orientation, Orientation::ROTATE_270);
+        // After remaining 270° on 800×600 → 600×800
+        // Target was 600×800 (from 90° of 800×600)
+        assert_eq!(lp.resize_to, (600, 800));
+        assert!(lp.resize_is_identity);
+    }
+
+    #[test]
+    fn decoder_applies_flip_instead_of_rotate() {
+        // We want Rotate90, decoder applied FlipH
+        let commands = [Command::AutoOrient(6)];
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+
+        let offer = DecoderOffer {
+            dimensions: (800, 600), // FlipH doesn't swap
+            crop_applied: None,
+            orientation_applied: Orientation::FLIP_H,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        // remaining = inverse(FlipH) ∘ Rotate90 = FlipH ∘ Rotate90 = Transverse
+        assert_eq!(lp.remaining_orientation, Orientation::TRANSVERSE);
+        // Transpose swaps axes: 800×600 → 600×800 = target
+        assert!(lp.resize_is_identity);
+    }
+
+    // ── Decoder applies partial orientation ──────────────────────────
+
+    #[test]
+    fn decoder_partial_orientation_flip_only() {
+        // We want Transverse (EXIF 7 = rot270 + flip), decoder only flipped
+        let commands = [Command::AutoOrient(7)];
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+        assert_eq!(ideal.orientation, Orientation::TRANSVERSE);
+
+        let offer = DecoderOffer {
+            dimensions: (800, 600),
+            crop_applied: None,
+            orientation_applied: Orientation::FLIP_H,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        // remaining = inverse(FlipH) ∘ Transverse = FlipH ∘ Transverse
+        let expected = Orientation::FLIP_H.compose(Orientation::TRANSVERSE);
+        assert_eq!(lp.remaining_orientation, expected);
+    }
+
+    // ── Decoder crops AND orients simultaneously ─────────────────────
+
+    #[test]
+    fn decoder_crop_and_orient_simultaneously() {
+        // Rotate90 + crop in oriented space → decoder handles both
+        let commands = [
+            Command::AutoOrient(6),
+            Command::Crop(SourceCrop::pixels(50, 50, 200, 300)),
+        ];
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+
+        // Decoder did everything: oriented + cropped
+        let offer = DecoderOffer {
+            dimensions: (200, 300),
+            crop_applied: req.crop,
+            orientation_applied: Orientation::ROTATE_90,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        assert!(lp.trim.is_none());
+        assert_eq!(lp.remaining_orientation, Orientation::IDENTITY);
+        assert!(lp.resize_is_identity);
+        assert_eq!(lp.resize_to, (200, 300));
+    }
+
+    #[test]
+    fn decoder_orients_but_not_crops() {
+        // Rotate90 + crop. Decoder handles rotation but ignores crop.
+        let commands = [
+            Command::AutoOrient(6),
+            Command::Crop(SourceCrop::pixels(50, 50, 200, 300)),
+        ];
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+
+        // Decoder rotated (swapped dims) but didn't crop
+        let offer = DecoderOffer {
+            dimensions: (600, 800),
+            crop_applied: None,
+            orientation_applied: Orientation::ROTATE_90,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        assert_eq!(lp.remaining_orientation, Orientation::IDENTITY);
+        // Should still have a trim for the requested crop (now in source coords)
+        assert!(lp.trim.is_some());
+        let trim = lp.trim.unwrap();
+        let rc = req.crop.unwrap();
+        assert_eq!((trim.width, trim.height), (rc.width, rc.height));
+    }
+
+    #[test]
+    fn decoder_crops_but_not_orients() {
+        // Rotate90 + crop. Decoder crops (in source coords) but doesn't rotate.
+        let commands = [
+            Command::AutoOrient(6),
+            Command::Crop(SourceCrop::pixels(50, 50, 200, 300)),
+        ];
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+        let source_crop = req.crop.unwrap();
+
+        // Decoder cropped exactly in source coords but didn't orient
+        let offer = DecoderOffer {
+            dimensions: (source_crop.width, source_crop.height),
+            crop_applied: Some(source_crop),
+            orientation_applied: Orientation::IDENTITY,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        assert!(lp.trim.is_none()); // crop was exact
+        assert_eq!(lp.remaining_orientation, Orientation::ROTATE_90);
+        // After remaining 90° on cropped dims → should match target
+        let (after_w, after_h) = lp
+            .remaining_orientation
+            .transform_dimensions(source_crop.width, source_crop.height);
+        assert_eq!((after_w, after_h), lp.resize_to);
+        assert!(lp.resize_is_identity);
+    }
+
+    // ── Decoder ignores everything ───────────────────────────────────
+
+    #[test]
+    fn decoder_ignores_everything_complex_pipeline() {
+        // Full pipeline: EXIF 5 (Transpose) + crop + constrain + pad
+        // Decoder does nothing.
+        let commands = [
+            Command::AutoOrient(5),
+            Command::Crop(SourceCrop::pixels(10, 10, 200, 300)),
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 100, 100),
+            },
+            Command::Pad {
+                top: 5,
+                right: 5,
+                bottom: 5,
+                left: 5,
+                color: CanvasColor::black(),
+            },
+        ];
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+        let offer = DecoderOffer::full_decode(800, 600);
+        let lp = finalize(&ideal, &req, &offer);
+
+        // Full orientation remains
+        assert_eq!(lp.remaining_orientation, Orientation::TRANSPOSE);
+        // Decoder output is full 800×600, needs crop → trim present
+        assert!(lp.trim.is_some());
+        assert!(!lp.resize_is_identity);
+        // Canvas includes padding
+        assert!(lp.canvas.0 > lp.resize_to.0);
+        assert!(lp.canvas.1 > lp.resize_to.1);
+    }
+
+    // ── All 8 EXIF orientations: decoder handles vs doesn't ──────────
+
+    #[test]
+    fn all_8_orientations_decoder_handles() {
+        for exif in 1..=8u8 {
+            let orientation = Orientation::from_exif(exif).unwrap();
+            let commands = [
+                Command::AutoOrient(exif),
+                Command::Constrain {
+                    constraint: Constraint::new(ConstraintMode::Fit, 300, 300),
+                },
+            ];
+            let (ideal, req) = plan(&commands, 800, 600).unwrap();
+
+            // Decoder applied the orientation
+            let (dw, dh) = orientation.transform_dimensions(800, 600);
+            let offer = DecoderOffer {
+                dimensions: (dw, dh),
+                crop_applied: None,
+                orientation_applied: orientation,
+            };
+            let lp = finalize(&ideal, &req, &offer);
+
+            assert_eq!(
+                lp.remaining_orientation,
+                Orientation::IDENTITY,
+                "EXIF {exif}: remaining should be identity when decoder handled it"
+            );
+            assert!(lp.trim.is_none());
+        }
+    }
+
+    #[test]
+    fn all_8_orientations_decoder_ignores() {
+        for exif in 1..=8u8 {
+            let orientation = Orientation::from_exif(exif).unwrap();
+            let commands = [Command::AutoOrient(exif)];
+            let (ideal, req) = plan(&commands, 800, 600).unwrap();
+
+            // Decoder did nothing
+            let offer = DecoderOffer::full_decode(800, 600);
+            let lp = finalize(&ideal, &req, &offer);
+
+            assert_eq!(
+                lp.remaining_orientation, orientation,
+                "EXIF {exif}: remaining should be the full orientation"
+            );
+            // For orient-only, after remaining orient the dims should match
+            let (after_w, after_h) = lp.remaining_orientation.transform_dimensions(800, 600);
+            assert_eq!(
+                (after_w, after_h),
+                lp.resize_to,
+                "EXIF {exif}: post-orient dims should match resize target"
+            );
+            assert!(
+                lp.resize_is_identity,
+                "EXIF {exif}: orient-only is identity"
+            );
+        }
+    }
+
+    // ── 1×1 pixel edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn one_pixel_image_passthrough() {
+        let (_, lp) = plan_finalize(&[], 1, 1, &DecoderOffer::full_decode(1, 1));
+        assert!(lp.resize_is_identity);
+        assert_eq!(lp.resize_to, (1, 1));
+        assert_eq!(lp.canvas, (1, 1));
+    }
+
+    #[test]
+    fn one_pixel_image_with_rotation() {
+        let commands = [Command::AutoOrient(6)]; // Rotate90
+        let (_, lp) = plan_finalize(&commands, 1, 1, &DecoderOffer::full_decode(1, 1));
+        // 1×1 rotated is still 1×1
+        assert!(lp.resize_is_identity);
+        assert_eq!(lp.resize_to, (1, 1));
+    }
+
+    #[test]
+    fn one_pixel_image_with_fit() {
+        // Fit upscales: 1×1 → 100×100
+        let commands = [Command::Constrain {
+            constraint: Constraint::new(ConstraintMode::Fit, 100, 100),
+        }];
+        let (_, lp) = plan_finalize(&commands, 1, 1, &DecoderOffer::full_decode(1, 1));
+        assert_eq!(lp.resize_to, (100, 100));
+        assert!(!lp.resize_is_identity);
+    }
+
+    #[test]
+    fn one_pixel_image_with_within() {
+        // Within never upscales: 1×1 stays 1×1
+        let commands = [Command::Constrain {
+            constraint: Constraint::new(ConstraintMode::Within, 100, 100),
+        }];
+        let (_, lp) = plan_finalize(&commands, 1, 1, &DecoderOffer::full_decode(1, 1));
+        assert_eq!(lp.resize_to, (1, 1));
+        assert!(lp.resize_is_identity);
+    }
+
+    // ── Decoder prescales with orientation ────────────────────────────
+
+    #[test]
+    fn decoder_prescale_with_orientation_handled() {
+        // 4000×3000, EXIF 6 (Rotate90), fit to 500×500
+        // Decoder prescales 1/4 AND handles rotation → delivers 750×1000
+        let commands = [
+            Command::AutoOrient(6),
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 500, 500),
+            },
+        ];
+        let (ideal, req) = plan(&commands, 4000, 3000).unwrap();
+        // Oriented: 3000×4000, fit to 500×500 → 375×500
+        assert_eq!(ideal.layout.resize_to, (375, 500));
+
+        let offer = DecoderOffer {
+            dimensions: (750, 1000), // 1/4 prescale + rotation
+            crop_applied: None,
+            orientation_applied: Orientation::ROTATE_90,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        assert_eq!(lp.remaining_orientation, Orientation::IDENTITY);
+        assert_eq!(lp.resize_to, (375, 500));
+        assert!(!lp.resize_is_identity); // 750×1000 → 375×500
+    }
+
+    #[test]
+    fn decoder_prescale_without_orientation() {
+        // 4000×3000, EXIF 6 (Rotate90), fit to 500×500
+        // Decoder prescales 1/4 but doesn't rotate → delivers 1000×750
+        let commands = [
+            Command::AutoOrient(6),
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 500, 500),
+            },
+        ];
+        let (ideal, req) = plan(&commands, 4000, 3000).unwrap();
+
+        let offer = DecoderOffer {
+            dimensions: (1000, 750), // 1/4 prescale, no rotation
+            crop_applied: None,
+            orientation_applied: Orientation::IDENTITY,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        assert_eq!(lp.remaining_orientation, Orientation::ROTATE_90);
+        // After 90° on 1000×750 → 750×1000
+        // Target is 375×500 → not identity
+        assert!(!lp.resize_is_identity);
+    }
+
+    // ── Decoder crop + prescale combo ────────────────────────────────
+
+    #[test]
+    fn decoder_crop_then_prescale() {
+        // Request crop 200×200, decoder crops to 208×208 (MCU) then prescales 1/2 → 104×104
+        let commands = [
+            Command::Crop(SourceCrop::pixels(100, 100, 200, 200)),
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 100, 100),
+            },
+        ];
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+        assert_eq!(ideal.layout.resize_to, (100, 100));
+
+        let offer = DecoderOffer {
+            dimensions: (104, 104), // MCU-aligned crop, then 1/2 prescale
+            crop_applied: Some(Rect::new(96, 96, 208, 208)),
+            orientation_applied: Orientation::IDENTITY,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        // Trim needed: within the 104×104 output, offset (4/2, 4/2) for 100×100?
+        // Actually, the trim is computed from requested vs applied crop in source coords,
+        // not accounting for prescale. The trim rect is in decoder-output coords.
+        let trim = lp.trim.unwrap();
+        assert_eq!(trim.x, 4); // 100 - 96 in source coords
+        assert_eq!(trim.y, 4);
+        // Width/height capped at decoder_w - dx
+        assert_eq!(trim.width, 100); // min(200, 104-4) = 100
+        assert_eq!(trim.height, 100);
+    }
+
+    // ── Canvas / placement preserved through finalize ────────────────
+
+    #[test]
+    fn finalize_preserves_canvas_from_fit_pad() {
+        let commands = [Command::Constrain {
+            constraint: Constraint::new(ConstraintMode::FitPad, 400, 400)
+                .canvas_color(CanvasColor::white()),
+        }];
+        let (ideal, req) = plan(&commands, 1000, 500).unwrap();
+        assert_eq!(ideal.layout.canvas, (400, 400));
+        assert_eq!(ideal.layout.resize_to, (400, 200));
+        assert_eq!(ideal.layout.placement, (0, 100));
+
+        let offer = DecoderOffer::full_decode(1000, 500);
+        let lp = finalize(&ideal, &req, &offer);
+
+        assert_eq!(lp.canvas, (400, 400));
+        assert_eq!(lp.placement, (0, 100));
+        assert_eq!(lp.canvas_color, CanvasColor::white());
+    }
+
+    #[test]
+    fn finalize_preserves_canvas_from_fit_crop() {
+        let commands = [Command::Constrain {
+            constraint: Constraint::new(ConstraintMode::FitCrop, 400, 400),
+        }];
+        let (ideal, req) = plan(&commands, 1000, 500).unwrap();
+        assert_eq!(ideal.layout.canvas, (400, 400));
+        assert_eq!(ideal.layout.resize_to, (400, 400));
+
+        let offer = DecoderOffer::full_decode(1000, 500);
+        let lp = finalize(&ideal, &req, &offer);
+
+        assert_eq!(lp.canvas, (400, 400));
+        assert_eq!(lp.resize_to, (400, 400));
+    }
+
+    // ── Decoder applies unrequested crop ─────────────────────────────
+
+    #[test]
+    fn decoder_crops_unrequested() {
+        // No crop in commands, but decoder crops anyway (weird but possible)
+        let commands = [Command::Constrain {
+            constraint: Constraint::new(ConstraintMode::Fit, 400, 300),
+        }];
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+        assert!(req.crop.is_none());
+
+        // Decoder randomly crops to 700×500
+        let offer = DecoderOffer {
+            dimensions: (700, 500),
+            crop_applied: Some(Rect::new(50, 50, 700, 500)),
+            orientation_applied: Orientation::IDENTITY,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        // No trim (we didn't request a crop, so no trim logic fires)
+        assert!(lp.trim.is_none());
+        // Resize target is still what the layout computed
+        assert_eq!(lp.resize_to, (400, 300));
+        // But resize_is_identity will be false (700×500 ≠ 400×300)
+        assert!(!lp.resize_is_identity);
+    }
+
+    // ── Orientation composition edge cases with finalize ─────────────
+
+    #[test]
+    fn decoder_applies_inverse_of_requested() {
+        // We want Rotate90, decoder applies Rotate270 (the inverse)
+        let commands = [Command::AutoOrient(6)]; // Rotate90
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+
+        let offer = DecoderOffer {
+            dimensions: (600, 800), // 270° swaps
+            crop_applied: None,
+            orientation_applied: Orientation::ROTATE_270,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        // remaining = inverse(270°) ∘ 90° = 90° ∘ 90° = 180°
+        assert_eq!(lp.remaining_orientation, Orientation::ROTATE_180);
+        // After 180° on 600×800 → 600×800 = target
+        assert!(lp.resize_is_identity);
+    }
+
+    #[test]
+    fn decoder_double_applies_orientation() {
+        // We want Rotate90, decoder applies Rotate90 twice (=180°)
+        // This is a weird edge case: decoder composed with itself
+        let commands = [Command::AutoOrient(6)]; // Rotate90
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+
+        let offer = DecoderOffer {
+            dimensions: (800, 600), // 180° doesn't swap
+            crop_applied: None,
+            orientation_applied: Orientation::ROTATE_180,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        // remaining = inverse(180°) ∘ 90° = 180° ∘ 90° = 270°
+        assert_eq!(lp.remaining_orientation, Orientation::ROTATE_270);
+        // 270° on 800×600 → 600×800 = target
+        assert!(lp.resize_is_identity);
+    }
+
+    // ── Asymmetric images with orientation ────────────────────────────
+
+    #[test]
+    fn tall_image_rotate90_decoder_handles() {
+        // 100×1000 (very tall), rotate 90° → 1000×100, fit to 500×500
+        let commands = [
+            Command::AutoOrient(6),
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 500, 500),
+            },
+        ];
+        let (ideal, req) = plan(&commands, 100, 1000).unwrap();
+        // oriented: 1000×100, fit to 500×500 → 500×50
+        assert_eq!(ideal.layout.resize_to, (500, 50));
+
+        let offer = DecoderOffer {
+            dimensions: (1000, 100),
+            crop_applied: None,
+            orientation_applied: Orientation::ROTATE_90,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        assert_eq!(lp.remaining_orientation, Orientation::IDENTITY);
+        assert!(!lp.resize_is_identity);
+        assert_eq!(lp.resize_to, (500, 50));
+    }
+
+    #[test]
+    fn square_image_all_orientations_are_identity() {
+        // Square image: all orientations produce same dimensions
+        for exif in 1..=8u8 {
+            let commands = [Command::AutoOrient(exif)];
+            let (_, lp) = plan_finalize(&commands, 500, 500, &DecoderOffer::full_decode(500, 500));
+            assert_eq!(lp.resize_to, (500, 500), "EXIF {exif}");
+            assert!(lp.resize_is_identity, "EXIF {exif}");
+        }
+    }
+
+    // ── Crop + constraint + orient + decoder partial ─────────────────
+
+    #[test]
+    fn full_pipeline_decoder_handles_only_orient() {
+        // EXIF 8 (Rotate270) + crop + fit
+        // 800×600 → oriented 600×800 → crop(50,50,400,600) → fit(200,200) → 150×200
+        let commands = [
+            Command::AutoOrient(8),
+            Command::Crop(SourceCrop::pixels(50, 50, 400, 600)),
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 200, 200),
+            },
+        ];
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+
+        // Decoder handles rotation but not crop
+        let offer = DecoderOffer {
+            dimensions: (600, 800), // 270° swaps
+            crop_applied: None,
+            orientation_applied: Orientation::ROTATE_270,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        assert_eq!(lp.remaining_orientation, Orientation::IDENTITY);
+        // Crop was in source coords; decoder didn't crop → trim = source crop
+        assert!(lp.trim.is_some());
+        assert!(!lp.resize_is_identity);
+    }
+
+    #[test]
+    fn full_pipeline_decoder_handles_nothing() {
+        // Same pipeline, decoder does absolutely nothing
+        let commands = [
+            Command::AutoOrient(8),
+            Command::Crop(SourceCrop::pixels(50, 50, 400, 600)),
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 200, 200),
+            },
+        ];
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+        let offer = DecoderOffer::full_decode(800, 600);
+        let lp = finalize(&ideal, &req, &offer);
+
+        assert_eq!(lp.remaining_orientation, Orientation::ROTATE_270);
+        assert!(lp.trim.is_some()); // crop not handled
+        assert!(!lp.resize_is_identity);
+    }
+
+    #[test]
+    fn full_pipeline_decoder_handles_everything() {
+        // Decoder handles orient + crop + prescale to exact target
+        let commands = [
+            Command::AutoOrient(8),
+            Command::Crop(SourceCrop::pixels(50, 50, 400, 600)),
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 200, 200),
+            },
+        ];
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+        let target = ideal.layout.resize_to;
+
+        let offer = DecoderOffer {
+            dimensions: target,
+            crop_applied: req.crop,
+            orientation_applied: Orientation::ROTATE_270,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        assert_eq!(lp.remaining_orientation, Orientation::IDENTITY);
+        assert!(lp.trim.is_none());
+        assert!(lp.resize_is_identity);
+    }
+
+    // ── Narrow / extreme aspect ratios ───────────────────────────────
+
+    #[test]
+    fn extreme_aspect_ratio_1x10000() {
+        let commands = [Command::Constrain {
+            constraint: Constraint::new(ConstraintMode::Fit, 100, 100),
+        }];
+        let (ideal, req) = plan(&commands, 1, 10000).unwrap();
+        // Fit 1×10000 into 100×100 → 1×100
+        assert_eq!(ideal.layout.resize_to, (1, 100));
+
+        let offer = DecoderOffer::full_decode(1, 10000);
+        let lp = finalize(&ideal, &req, &offer);
+        assert!(!lp.resize_is_identity);
+        assert_eq!(lp.resize_to, (1, 100));
+    }
+
+    #[test]
+    fn extreme_aspect_ratio_10000x1() {
+        let commands = [Command::Constrain {
+            constraint: Constraint::new(ConstraintMode::Fit, 100, 100),
+        }];
+        let (ideal, _) = plan(&commands, 10000, 1).unwrap();
+        assert_eq!(ideal.layout.resize_to, (100, 1));
+    }
+
+    // ── Exact match decoder behavior ─────────────────────────────────
+
+    #[test]
+    fn decoder_exact_crop_no_trim() {
+        let commands = [Command::Crop(SourceCrop::pixels(100, 100, 200, 200))];
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+
+        let offer = DecoderOffer {
+            dimensions: (200, 200),
+            crop_applied: Some(Rect::new(100, 100, 200, 200)),
+            orientation_applied: Orientation::IDENTITY,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        assert!(lp.trim.is_none());
+        assert!(lp.resize_is_identity);
+    }
+
+    // ── Flips are self-inverse ───────────────────────────────────────
+
+    #[test]
+    fn decoder_applies_same_flip_twice_is_identity() {
+        // User wants FlipH, decoder also applies FlipH → remaining = identity
+        let commands = [Command::Flip(FlipAxis::Horizontal)];
+        let (ideal, req) = plan(&commands, 800, 600).unwrap();
+
+        let offer = DecoderOffer {
+            dimensions: (800, 600),
+            crop_applied: None,
+            orientation_applied: Orientation::FLIP_H,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+        assert_eq!(lp.remaining_orientation, Orientation::IDENTITY);
+    }
+
+    // ── FitPad with decoder prescale ─────────────────────────────────
+
+    #[test]
+    fn fit_pad_with_prescaled_decoder() {
+        let commands = [Command::Constrain {
+            constraint: Constraint::new(ConstraintMode::FitPad, 400, 400)
+                .canvas_color(CanvasColor::white()),
+        }];
+        let (ideal, req) = plan(&commands, 4000, 2000).unwrap();
+        // Fit 4000×2000 into 400×400 → 400×200, canvas 400×400, placement (0,100)
+        assert_eq!(ideal.layout.resize_to, (400, 200));
+        assert_eq!(ideal.layout.canvas, (400, 400));
+        assert_eq!(ideal.layout.placement, (0, 100));
+
+        // Decoder prescales to 1000×500
+        let offer = DecoderOffer {
+            dimensions: (1000, 500),
+            crop_applied: None,
+            orientation_applied: Orientation::IDENTITY,
+        };
+        let lp = finalize(&ideal, &req, &offer);
+
+        assert_eq!(lp.resize_to, (400, 200));
+        assert_eq!(lp.canvas, (400, 400));
+        assert_eq!(lp.placement, (0, 100));
+        assert!(!lp.resize_is_identity);
     }
 }
