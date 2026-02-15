@@ -138,6 +138,8 @@ impl Orientation {
 
     /// Compose two orientations: apply `self` first, then `other`.
     ///
+    /// Alias: [`then`](Self::then) reads more naturally in chains.
+    ///
     /// This follows the D4 group multiplication rule verified against
     /// the Cayley table in zenjpeg's `coeff_transform.rs`.
     pub const fn compose(self, other: Self) -> Self {
@@ -148,6 +150,12 @@ impl Orientation {
         } else {
             Self::from_rotation_flip(r1.wrapping_sub(r2) & 3, !f2)
         }
+    }
+
+    /// Alias for [`compose`](Self::compose). Reads naturally in chains:
+    /// `Rotate90.then(FlipH)` = apply Rotate90 first, then FlipH.
+    pub const fn then(self, other: Self) -> Self {
+        self.compose(other)
     }
 
     /// The inverse orientation: `self.compose(self.inverse()) == Identity`.

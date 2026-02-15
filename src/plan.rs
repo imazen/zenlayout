@@ -274,6 +274,24 @@ pub struct Padding {
     pub color: CanvasColor,
 }
 
+impl Padding {
+    /// Create padding with per-side values (CSS order: top, right, bottom, left).
+    pub const fn new(top: u32, right: u32, bottom: u32, left: u32, color: CanvasColor) -> Self {
+        Self {
+            top,
+            right,
+            bottom,
+            left,
+            color,
+        }
+    }
+
+    /// Create uniform padding on all sides.
+    pub const fn uniform(amount: u32, color: CanvasColor) -> Self {
+        Self::new(amount, amount, amount, amount, color)
+    }
+}
+
 /// What the layout engine wants the decoder to do.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DecoderRequest {
@@ -725,11 +743,22 @@ impl OutputLimits {
     }
 }
 
+/// Internal: unified source region (crop or viewport region share a slot).
+#[derive(Clone, Debug)]
+enum SourceRegion {
+    Crop(SourceCrop),
+    Region(Region),
+}
+
 /// Builder for image processing pipelines.
 ///
 /// Provides a fluent API for specifying orientation, crop, constraint, and
 /// padding operations. All operations are in post-orientation coordinates
 /// (what the user sees after rotation).
+///
+/// **Last-setter-wins**: calling the same category of method twice replaces
+/// the previous value (standard builder pattern). Orientation is the
+/// exception — orientation commands always compose algebraically.
 ///
 /// # Example
 ///
@@ -752,13 +781,10 @@ pub struct Pipeline {
     source_w: u32,
     source_h: u32,
     orientation: Orientation,
-    crop: Option<SourceCrop>,
-    region: Option<Region>,
+    source_region: Option<SourceRegion>,
     constraint: Option<Constraint>,
     padding: Option<Padding>,
     limits: Option<OutputLimits>,
-    /// Ordered command list for sequential evaluation mode.
-    commands: Vec<Command>,
 }
 
 impl Pipeline {
@@ -768,12 +794,10 @@ impl Pipeline {
             source_w,
             source_h,
             orientation: Orientation::Identity,
-            crop: None,
-            region: None,
+            source_region: None,
             constraint: None,
             padding: None,
             limits: None,
-            commands: Vec::new(),
         }
     }
 
@@ -786,7 +810,6 @@ impl Pipeline {
         if let Some(o) = Orientation::from_exif(exif) {
             self.orientation = self.orientation.compose(o);
         }
-        self.commands.push(Command::AutoOrient(exif));
         self
     }
 
@@ -794,7 +817,6 @@ impl Pipeline {
     /// commands into a single source transform (see [`auto_orient`](Self::auto_orient)).
     pub fn rotate_90(mut self) -> Self {
         self.orientation = self.orientation.compose(Orientation::Rotate90);
-        self.commands.push(Command::Rotate(Rotation::Rotate90));
         self
     }
 
@@ -802,7 +824,6 @@ impl Pipeline {
     /// into a single source transform (see [`auto_orient`](Self::auto_orient)).
     pub fn rotate_180(mut self) -> Self {
         self.orientation = self.orientation.compose(Orientation::Rotate180);
-        self.commands.push(Command::Rotate(Rotation::Rotate180));
         self
     }
 
@@ -810,7 +831,6 @@ impl Pipeline {
     /// commands into a single source transform (see [`auto_orient`](Self::auto_orient)).
     pub fn rotate_270(mut self) -> Self {
         self.orientation = self.orientation.compose(Orientation::Rotate270);
-        self.commands.push(Command::Rotate(Rotation::Rotate270));
         self
     }
 
@@ -818,7 +838,6 @@ impl Pipeline {
     /// into a single source transform (see [`auto_orient`](Self::auto_orient)).
     pub fn flip_h(mut self) -> Self {
         self.orientation = self.orientation.compose(Orientation::FlipH);
-        self.commands.push(Command::Flip(FlipAxis::Horizontal));
         self
     }
 
@@ -826,7 +845,6 @@ impl Pipeline {
     /// into a single source transform (see [`auto_orient`](Self::auto_orient)).
     pub fn flip_v(mut self) -> Self {
         self.orientation = self.orientation.compose(Orientation::FlipV);
-        self.commands.push(Command::Flip(FlipAxis::Vertical));
         self
     }
 
@@ -836,47 +854,31 @@ impl Pipeline {
     /// is the crop region size. Compare with [`region_viewport`](Self::region_viewport)
     /// which uses edge coordinates (left, top, right, bottom).
     ///
-    /// In fixed mode, first crop/region wins; later ones are ignored.
-    pub fn crop_pixels(mut self, x: u32, y: u32, width: u32, height: u32) -> Self {
-        let sc = SourceCrop::pixels(x, y, width, height);
-        self.commands.push(Command::Crop(sc));
-        if self.crop.is_none() {
-            self.crop = Some(sc);
-        }
-        self
+    /// Replaces any previous crop or region.
+    pub fn crop_pixels(self, x: u32, y: u32, width: u32, height: u32) -> Self {
+        self.crop(SourceCrop::pixels(x, y, width, height))
     }
 
     /// Crop using percentage coordinates (0.0–1.0) in post-orientation space.
     ///
-    /// In fixed mode, first crop/region wins; later ones are ignored.
-    pub fn crop_percent(mut self, x: f32, y: f32, width: f32, height: f32) -> Self {
-        let sc = SourceCrop::percent(x, y, width, height);
-        self.commands.push(Command::Crop(sc));
-        if self.crop.is_none() {
-            self.crop = Some(sc);
-        }
-        self
+    /// Replaces any previous crop or region.
+    pub fn crop_percent(self, x: f32, y: f32, width: f32, height: f32) -> Self {
+        self.crop(SourceCrop::percent(x, y, width, height))
     }
 
     /// Crop with a pre-built [`SourceCrop`].
     ///
-    /// In fixed mode, first crop/region wins; later ones are ignored.
+    /// Replaces any previous crop or region.
     pub fn crop(mut self, source_crop: SourceCrop) -> Self {
-        self.commands.push(Command::Crop(source_crop));
-        if self.crop.is_none() {
-            self.crop = Some(source_crop);
-        }
+        self.source_region = Some(SourceRegion::Crop(source_crop));
         self
     }
 
     /// Define a viewport region in source coordinates (post-orientation).
     ///
-    /// In fixed mode, first crop/region wins; later ones are ignored.
+    /// Replaces any previous crop or region.
     pub fn region(mut self, region: Region) -> Self {
-        self.commands.push(Command::Region(region));
-        if self.crop.is_none() && self.region.is_none() {
-            self.region = Some(region);
-        }
+        self.source_region = Some(SourceRegion::Region(region));
         self
     }
 
@@ -917,7 +919,7 @@ impl Pipeline {
     /// **Will upscale** small images to fill the target. Use
     /// [`within`](Self::within) to prevent upscaling.
     ///
-    /// In fixed mode, first constraint wins; later ones are ignored.
+    /// Replaces any previous constraint.
     pub fn fit(self, width: u32, height: u32) -> Self {
         self.constrain(Constraint::new(ConstraintMode::Fit, width, height))
     }
@@ -925,7 +927,7 @@ impl Pipeline {
     /// Fit within target dimensions, never upscaling. Images smaller than
     /// the target stay at their original size.
     ///
-    /// In fixed mode, first constraint wins; later ones are ignored.
+    /// Replaces any previous constraint.
     pub fn within(self, width: u32, height: u32) -> Self {
         self.constrain(Constraint::new(ConstraintMode::Within, width, height))
     }
@@ -933,92 +935,78 @@ impl Pipeline {
     /// Scale to fill target, cropping overflow. Preserves aspect ratio.
     /// Output is exactly `width × height`. May upscale.
     ///
-    /// In fixed mode, first constraint wins; later ones are ignored.
+    /// Replaces any previous constraint.
     pub fn fit_crop(self, width: u32, height: u32) -> Self {
         self.constrain(Constraint::new(ConstraintMode::FitCrop, width, height))
     }
 
     /// Like [`fit_crop`](Self::fit_crop), but never upscales.
     ///
-    /// In fixed mode, first constraint wins; later ones are ignored.
+    /// Replaces any previous constraint.
     pub fn within_crop(self, width: u32, height: u32) -> Self {
         self.constrain(Constraint::new(ConstraintMode::WithinCrop, width, height))
     }
 
     /// Fit within target, padding to exact target dimensions. May upscale.
     ///
-    /// In fixed mode, first constraint wins; later ones are ignored.
+    /// Replaces any previous constraint.
     pub fn fit_pad(self, width: u32, height: u32) -> Self {
         self.constrain(Constraint::new(ConstraintMode::FitPad, width, height))
     }
 
     /// Like [`fit_pad`](Self::fit_pad), but never upscales.
     ///
-    /// In fixed mode, first constraint wins; later ones are ignored.
+    /// Replaces any previous constraint.
     pub fn within_pad(self, width: u32, height: u32) -> Self {
         self.constrain(Constraint::new(ConstraintMode::WithinPad, width, height))
     }
 
     /// Scale to exact target dimensions, distorting aspect ratio.
     ///
-    /// In fixed mode, first constraint wins; later ones are ignored.
+    /// Replaces any previous constraint.
     pub fn distort(self, width: u32, height: u32) -> Self {
         self.constrain(Constraint::new(ConstraintMode::Distort, width, height))
     }
 
     /// Crop to target aspect ratio without scaling.
     ///
-    /// In fixed mode, first constraint wins; later ones are ignored.
+    /// Replaces any previous constraint.
     pub fn aspect_crop(self, width: u32, height: u32) -> Self {
         self.constrain(Constraint::new(ConstraintMode::AspectCrop, width, height))
     }
 
     /// Apply a pre-built [`Constraint`] for advanced cases (gravity, canvas color, single-axis).
     ///
-    /// In fixed mode, first constraint wins; later ones are ignored.
+    /// Replaces any previous constraint.
     ///
     /// If the [`Constraint`] has its own [`source_crop`](Constraint::source_crop),
     /// that crop composes with (nests inside) any pipeline-level crop or region.
     pub fn constrain(mut self, constraint: Constraint) -> Self {
-        self.commands.push(Command::Constrain {
-            constraint: constraint.clone(),
-        });
-        if self.constraint.is_none() {
-            self.constraint = Some(constraint);
-        }
+        self.constraint = Some(constraint);
         self
     }
 
-    /// Add uniform padding on all sides. Values are absolute pixels; they
-    /// never collapse or merge (unlike CSS margins).
+    /// Add padding with a pre-built [`Padding`].
     ///
-    /// In fixed mode, first pad wins; later ones are ignored.
-    pub fn pad_uniform(self, amount: u32, color: CanvasColor) -> Self {
-        self.pad(amount, amount, amount, amount, color)
+    /// Replaces any previous padding.
+    pub fn pad(mut self, padding: Padding) -> Self {
+        self.padding = Some(padding);
+        self
     }
 
     /// Add padding around the image. Values are absolute pixels; they
     /// never collapse or merge (unlike CSS margins).
     ///
-    /// In fixed mode, first pad wins; later ones are ignored.
-    pub fn pad(mut self, top: u32, right: u32, bottom: u32, left: u32, color: CanvasColor) -> Self {
-        self.commands.push(Command::Pad {
-            top,
-            right,
-            bottom,
-            left,
-            color,
-        });
-        if self.padding.is_none() {
-            self.padding = Some(Padding {
-                top,
-                right,
-                bottom,
-                left,
-                color,
-            });
-        }
-        self
+    /// Replaces any previous padding.
+    pub fn pad_sides(self, top: u32, right: u32, bottom: u32, left: u32, color: CanvasColor) -> Self {
+        self.pad(Padding::new(top, right, bottom, left, color))
+    }
+
+    /// Add uniform padding on all sides.
+    ///
+    /// Replaces any previous padding.
+    pub fn pad_uniform(self, amount: u32, color: CanvasColor) -> Self {
+        self.pad(Padding::uniform(amount, color))
     }
 
     /// Apply safety limits after layout computation.
@@ -1029,34 +1017,24 @@ impl Pipeline {
         self
     }
 
-    /// Compute the ideal layout and decoder request (fixed pipeline mode).
+    /// Compute the ideal layout and decoder request.
     ///
-    /// Uses fixed-pipeline semantics: first-wins for crop/region/constrain/pad.
-    /// For sequential evaluation, use [`plan_sequential()`](Self::plan_sequential).
+    /// Processes the pipeline in fixed order: orient → crop/region → constrain → pad → limits.
+    /// For sequential command evaluation, use [`compute_layout_sequential()`] directly.
     pub fn plan(self) -> Result<(IdealLayout, DecoderRequest), LayoutError> {
+        let (crop, region) = match self.source_region {
+            Some(SourceRegion::Crop(c)) => (Some(c), None),
+            Some(SourceRegion::Region(r)) => (None, Some(r)),
+            None => (None, None),
+        };
         plan_from_parts(
             self.source_w,
             self.source_h,
             self.orientation,
-            self.crop.as_ref(),
-            self.region,
+            crop.as_ref(),
+            region,
             self.constraint.as_ref(),
             self.padding,
-            self.limits.as_ref(),
-        )
-    }
-
-    /// Compute the ideal layout with sequential evaluation.
-    ///
-    /// Unlike [`plan()`](Self::plan) which uses fixed-pipeline semantics (first-wins),
-    /// this processes commands in order. Orientations always fuse. Crop/region
-    /// commands compose sequentially. Last constraint wins. Post-constraint
-    /// crop/pad adjusts the output canvas.
-    pub fn plan_sequential(self) -> Result<(IdealLayout, DecoderRequest), LayoutError> {
-        compute_layout_sequential(
-            &self.commands,
-            self.source_w,
-            self.source_h,
             self.limits.as_ref(),
         )
     }
@@ -1328,7 +1306,7 @@ pub fn compute_layout(
 /// - Post-constraint crop/region/pad adjusts the output canvas
 /// - Limits are applied once at the end
 ///
-/// For a friendlier API, see [`Pipeline::plan_sequential()`].
+/// For a friendlier builder API, see [`Pipeline`].
 pub fn compute_layout_sequential(
     commands: &[Command],
     source_w: u32,
@@ -3194,7 +3172,7 @@ mod tests {
     #[test]
     fn pipeline_pad_asymmetric() {
         let (ideal, _) = Pipeline::new(400, 300)
-            .pad(5, 10, 15, 20, CanvasColor::black())
+            .pad_sides(5, 10, 15, 20, CanvasColor::black())
             .plan()
             .unwrap();
         assert_eq!(ideal.layout.canvas, Size::new(430, 320)); // 400+10+20, 300+5+15
@@ -3243,24 +3221,25 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_first_constraint_wins() {
+    fn pipeline_last_constraint_wins() {
         let (ideal, _) = Pipeline::new(800, 600)
             .fit(200, 200)
-            .within(100, 100) // ignored
+            .within(100, 100) // replaces fit
             .plan()
             .unwrap();
-        assert_eq!(ideal.layout.resize_to, Size::new(200, 150));
+        // Within 100×100 on 800×600: source is larger → downscale to 100×75
+        assert_eq!(ideal.layout.resize_to, Size::new(100, 75));
     }
 
     #[test]
-    fn pipeline_first_crop_wins() {
+    fn pipeline_last_crop_wins() {
         let (ideal, _) = Pipeline::new(800, 600)
             .crop_pixels(0, 0, 100, 100)
-            .crop_pixels(200, 200, 50, 50) // ignored
+            .crop_pixels(200, 200, 50, 50) // replaces first crop
             .plan()
             .unwrap();
         let crop = ideal.source_crop.unwrap();
-        assert_eq!(crop, Rect::new(0, 0, 100, 100));
+        assert_eq!(crop, Rect::new(200, 200, 50, 50));
     }
 
     #[test]
@@ -5015,12 +4994,14 @@ mod tests {
             .plan()
             .unwrap();
 
-        let sequential = Pipeline::new(800, 600)
-            .auto_orient(6)
-            .crop_pixels(50, 50, 500, 700)
-            .fit(300, 300)
-            .plan_sequential()
-            .unwrap();
+        let commands = [
+            Command::AutoOrient(6),
+            Command::Crop(SourceCrop::pixels(50, 50, 500, 700)),
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 300, 300),
+            },
+        ];
+        let sequential = compute_layout_sequential(&commands, 800, 600, None).unwrap();
 
         assert_eq!(fixed.0.layout.resize_to, sequential.0.layout.resize_to);
         assert_eq!(fixed.0.layout.canvas, sequential.0.layout.canvas);
@@ -5146,12 +5127,14 @@ mod tests {
     }
 
     #[test]
-    fn sequential_pipeline_method() {
-        let (ideal, _) = Pipeline::new(800, 600)
-            .auto_orient(6)
-            .fit(300, 300)
-            .plan_sequential()
-            .unwrap();
+    fn sequential_via_free_function() {
+        let commands = [
+            Command::AutoOrient(6),
+            Command::Constrain {
+                constraint: Constraint::new(ConstraintMode::Fit, 300, 300),
+            },
+        ];
+        let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
         assert_eq!(ideal.orientation, Orientation::Rotate90);
         // 600×800 oriented, fit 300×300 → 225×300
         assert_eq!(ideal.layout.resize_to, Size::new(225, 300));

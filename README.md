@@ -35,11 +35,11 @@ let plan = ideal.finalize(&request, &offer);
 
 ## Processing pipeline
 
-The pipeline processes commands in a fixed order, regardless of the order they appear in the command list. Each slot (crop/region, constrain, pad) accepts the **first** matching command; duplicates are silently ignored.
+The `Pipeline` builder processes operations in a fixed order, regardless of the order setters are called. **Last-setter-wins**: calling the same category twice replaces the previous value (standard builder pattern). Orientation is the exception — it always composes algebraically.
 
 ```text
-Pipeline processing order (fixed mode)
-══════════════════════════════════════
+Pipeline processing order
+═════════════════════════
 
 1. ORIENT — All orientation commands (auto_orient, rotate, flip) compose
    into a single source transform via D4 group algebra. This happens
@@ -49,22 +49,21 @@ Pipeline processing order (fixed mode)
      .auto_orient(6).rotate_90() = Rotate90 ∘ Rotate90 = Rotate180
      .fit(800, 600).flip_h()     = flip source, then fit (not "fit then flip")
 
-2. REGION or CROP — Define the effective source. First one wins; if you
-   set both a crop and a region, the second is silently ignored.
+2. REGION or CROP — Define the effective source. Crop and region share a
+   single slot; setting either replaces the other.
    - Crop: select a rectangle within the source (origin + size)
    - Region: viewport into infinite canvas (edge coords; can crop, pad, or both)
    Crop converts to Region internally.
 
-3. CONSTRAIN — Resize the effective source to target dimensions. First one
-   wins. The 8 constraint modes control aspect ratio handling.
+3. CONSTRAIN — Resize the effective source to target dimensions. The 8
+   constraint modes control aspect ratio handling.
    - Fit/FitCrop/FitPad/Distort will upscale small images
    - Within/WithinCrop/WithinPad will not
    - Single-axis constraints derive the missing dimension from aspect ratio
 
-4. PAD — Add explicit padding around the constrained result. First one wins.
-   Additive on canvas dimensions. Padding does NOT collapse — pad(10,10,10,10)
+4. PAD — Add explicit padding around the constrained result. Additive on
+   canvas dimensions. Padding does NOT collapse — pad_uniform(10, color)
    always adds exactly 10px on each side regardless of other commands.
-   Unlike CSS margin collapsing.
 
 5. LIMITS — Safety limits applied to the final canvas:
    a. max — proportional downscale if canvas exceeds max (security cap)
@@ -73,7 +72,7 @@ Pipeline processing order (fixed mode)
    Max always wins over min.
 ```
 
-**Sequential mode** (`plan_sequential()` / `compute_layout_sequential()`): same operations, but commands execute in order. Orient still fuses into a source transform. Multiple crop/region compose (each refines the previous). **Last** constrain wins (opposite of fixed mode). Post-constrain crop/pad adjusts the output canvas.
+**Sequential mode** (`compute_layout_sequential()`): same operations, but commands execute in order. Orient still fuses into a source transform. Multiple crop/region compose (each refines the previous). **Last** constrain wins. Post-constrain crop/pad adjusts the output canvas.
 
 ## Two-phase layout
 
@@ -221,29 +220,20 @@ let (ideal, _) = Pipeline::new(800, 600)
     .unwrap();
 ```
 
-`SourceCrop` converts to `Region` internally via `to_region()`. Region and Crop are mutually exclusive — first one set wins in fixed mode.
+`SourceCrop` converts to `Region` internally via `to_region()`. Region and Crop share a single slot — setting either replaces the other.
 
 When a Region is combined with a constraint, the constraint operates on the overlap between the viewport and the source. The viewport's padding areas scale proportionally.
 
 ## Sequential mode
 
-For scripting use cases where command order matters, use sequential evaluation:
+For scripting use cases where command order matters, use `compute_layout_sequential()` with a `Command` slice:
 
 ```rust
-use zenlayout::{Pipeline, compute_layout_sequential, Command, SourceCrop};
+use zenlayout::{compute_layout_sequential, Command, SourceCrop};
 
-// Pipeline API
-let (ideal, _) = Pipeline::new(800, 600)
-    .crop_pixels(100, 100, 600, 400)  // first crop
-    .crop_pixels(50, 50, 500, 300)    // refines the first crop
-    .fit(200, 150)
-    .plan_sequential()
-    .unwrap();
-
-// Command slice API
 let commands = [
     Command::Crop(SourceCrop::pixels(100, 100, 600, 400)),
-    Command::Crop(SourceCrop::pixels(50, 50, 500, 300)),
+    Command::Crop(SourceCrop::pixels(50, 50, 500, 300)),  // refines the first crop
 ];
 let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
 ```
@@ -251,15 +241,15 @@ let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
 Sequential mode differences from fixed mode:
 - **Orient**: still fuses into a single source transform regardless of position
 - **Crop/Region**: compose sequentially (second crop refines the first)
-- **Constrain**: **last** one wins (opposite of fixed mode's first-wins)
+- **Constrain**: last one wins
 - **Post-constrain crop/pad**: adjusts the output canvas, not the source
 - **Limits**: applied once at the end (same as fixed)
 
-Both modes still produce a single `Layout` — one crop, one resize, one canvas. "Sequential" refers to the command evaluation order, not multi-pass pixel processing.
+Both modes produce a single `Layout` — one crop, one resize, one canvas. "Sequential" refers to the command evaluation order, not multi-pass pixel processing.
 
 ## Padding
 
-Padding values are absolute pixel counts. They do not collapse, merge, or interact — `pad(10, 10, 10, 10)` always adds exactly 10px on each side regardless of other commands. This differs from CSS margin collapsing.
+Padding values are absolute pixel counts. They do not collapse, merge, or interact — `pad_uniform(10, color)` always adds exactly 10px on each side regardless of other commands. This differs from CSS margin collapsing.
 
 ## Full API reference
 
@@ -505,10 +495,10 @@ Builder for image processing pipelines. All operations are in post-orientation c
 | `rotate_270` | `fn rotate_270(self) -> Self` | Rotate 270 deg CW. Composes into source transform. |
 | `flip_h` | `fn flip_h(self) -> Self` | Flip horizontally. Composes into source transform. |
 | `flip_v` | `fn flip_v(self) -> Self` | Flip vertically. Composes into source transform. |
-| `crop_pixels` | `fn crop_pixels(self, x: u32, y: u32, width: u32, height: u32) -> Self` | Crop to pixel coords, origin + size (first wins) |
-| `crop_percent` | `fn crop_percent(self, x: f32, y: f32, width: f32, height: f32) -> Self` | Crop using percentages (first wins) |
-| `crop` | `fn crop(self, source_crop: SourceCrop) -> Self` | Crop with pre-built `SourceCrop` (first wins) |
-| `region` | `fn region(self, region: Region) -> Self` | Set viewport region (first crop/region wins) |
+| `crop_pixels` | `fn crop_pixels(self, x: u32, y: u32, width: u32, height: u32) -> Self` | Crop to pixel coords, origin + size |
+| `crop_percent` | `fn crop_percent(self, x: f32, y: f32, width: f32, height: f32) -> Self` | Crop using percentages |
+| `crop` | `fn crop(self, source_crop: SourceCrop) -> Self` | Crop with pre-built `SourceCrop` |
+| `region` | `fn region(self, region: Region) -> Self` | Set viewport region |
 | `region_viewport` | `fn region_viewport(self, left: i32, top: i32, right: i32, bottom: i32, color: CanvasColor) -> Self` | Viewport from edge coords (not origin + size) |
 | `region_pad` | `fn region_pad(self, amount: u32, color: CanvasColor) -> Self` | Uniform padding via region |
 | `region_blank` | `fn region_blank(self, width: u32, height: u32, color: CanvasColor) -> Self` | Blank canvas (no source content) |
@@ -520,12 +510,12 @@ Builder for image processing pipelines. All operations are in post-orientation c
 | `within_pad` | `fn within_pad(self, width: u32, height: u32) -> Self` | Fit within target, pad, never upscales |
 | `distort` | `fn distort(self, width: u32, height: u32) -> Self` | Scale to exact target (stretches) |
 | `aspect_crop` | `fn aspect_crop(self, width: u32, height: u32) -> Self` | Crop to target aspect ratio, no scaling |
-| `constrain` | `fn constrain(self, constraint: Constraint) -> Self` | Apply pre-built `Constraint` (first wins) |
+| `constrain` | `fn constrain(self, constraint: Constraint) -> Self` | Apply pre-built `Constraint` |
+| `pad` | `fn pad(self, padding: Padding) -> Self` | Add padding with pre-built `Padding` |
+| `pad_sides` | `fn pad_sides(self, top: u32, right: u32, bottom: u32, left: u32, color: CanvasColor) -> Self` | Add asymmetric padding |
 | `pad_uniform` | `fn pad_uniform(self, amount: u32, color: CanvasColor) -> Self` | Add uniform padding on all sides |
-| `pad` | `fn pad(self, top: u32, right: u32, bottom: u32, left: u32, color: CanvasColor) -> Self` | Add asymmetric padding (first wins) |
 | `output_limits` | `fn output_limits(self, limits: OutputLimits) -> Self` | Apply safety limits after layout computation |
-| `plan` | `fn plan(self) -> Result<(IdealLayout, DecoderRequest), LayoutError>` | Compute ideal layout (fixed pipeline, phase 1) |
-| `plan_sequential` | `fn plan_sequential(self) -> Result<(IdealLayout, DecoderRequest), LayoutError>` | Compute ideal layout (sequential evaluation, phase 1) |
+| `plan` | `fn plan(self) -> Result<(IdealLayout, DecoderRequest), LayoutError>` | Compute ideal layout (phase 1) |
 
 Derives: `Clone`, `Debug`
 
@@ -543,7 +533,7 @@ Individual processing command for programmatic construction (alternative to `Pip
 | `Constrain` | `{ constraint: Constraint }` | Constrain dimensions |
 | `Pad` | `{ top, right, bottom, left: u32, color: CanvasColor }` | Add padding |
 
-In fixed mode (`compute_layout`): first `Crop`/`Region`, first `Constrain`, and first `Pad` win; duplicates ignored. In sequential mode (`compute_layout_sequential`): commands compose in order.
+In `compute_layout` (fixed mode): first `Crop`/`Region`, first `Constrain`, and first `Pad` win. In `compute_layout_sequential` (sequential mode): commands compose in order, last constraint wins.
 
 Derives: `Clone`, `Debug`, `PartialEq`
 
@@ -588,6 +578,7 @@ Image orientation as an element of the D4 dihedral group. `#[non_exhaustive]`.
 | `is_identity` | `const fn is_identity(self) -> bool` | Whether this is the identity |
 | `swaps_axes` | `const fn swaps_axes(self) -> bool` | Whether width and height swap |
 | `compose` | `const fn compose(self, other: Self) -> Self` | Apply `self` then `other` (D4 group multiplication) |
+| `then` | `const fn then(self, other: Self) -> Self` | Alias for `compose`. Reads naturally in chains. |
 | `inverse` | `const fn inverse(self) -> Self` | Inverse: `self.compose(self.inverse()) == Identity` |
 | `transform_dimensions` | `const fn transform_dimensions(self, w: u32, h: u32) -> Size` | Transform source dimensions to display dimensions |
 | `transform_rect_to_source` | `fn transform_rect_to_source(self, rect: Rect, source_w: u32, source_h: u32) -> Rect` | Transform display rect back to source coordinates |
@@ -658,7 +649,7 @@ pub struct LayoutPlan {
     pub resize_to: Size,                      // Target resize dimensions
     pub remaining_orientation: Orientation,    // Orientation remaining after decoder
     pub canvas: Size,                         // Final canvas dimensions
-    pub placement: (u32, u32),                // Image placement on canvas
+    pub placement: (i32, i32),                // Image placement on canvas
     pub canvas_color: CanvasColor,            // Background color
     pub resize_is_identity: bool,             // True when no resize needed
     pub content_size: Option<Size>,           // Real content if Align::Extend was used
@@ -680,6 +671,11 @@ pub struct Padding {
     pub color: CanvasColor,
 }
 ```
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `new` | `const fn new(top: u32, right: u32, bottom: u32, left: u32, color: CanvasColor) -> Self` | Create padding with per-side values (CSS order) |
+| `uniform` | `const fn uniform(amount: u32, color: CanvasColor) -> Self` | Create uniform padding on all sides |
 
 Derives: `Copy`, `Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`
 
@@ -869,7 +865,7 @@ Source crop coordinates are scaled from primary to secondary space with round-ou
 |------|---------|-------------|
 | `std` | Yes | Standard library support. Disable for `no_std` environments. Enables `Error` impl for `LayoutError`. |
 
-The crate uses `#![forbid(unsafe_code)]` and makes zero heap allocations (except for the `commands` Vec in `Pipeline` which is only used if `plan_sequential()` is called).
+The crate uses `#![forbid(unsafe_code)]`. The `Pipeline` builder makes zero heap allocations. The `compute_layout_sequential()` free function allocates internally.
 
 ## License
 
