@@ -256,8 +256,8 @@ impl Grid {
         // Crop the source overlap
         let overlap = self.crop(ol, ot, or_ - ol, ob - ot);
         // Place on viewport canvas
-        let place_x = (ol as i32 - left) as i32;
-        let place_y = (ot as i32 - top) as i32;
+        let place_x = ol as i32 - left;
+        let place_y = ot as i32 - top;
         overlap.place_on_canvas(vw, vh, place_x, place_y)
     }
 
@@ -275,7 +275,7 @@ impl Grid {
 
         // 3. Place on canvas
         let (px, py) = layout.placement;
-        resized.place_on_canvas(layout.canvas.width, layout.canvas.height, px as i32, py as i32)
+        resized.place_on_canvas(layout.canvas.width, layout.canvas.height, px, py)
     }
 
     fn summary(&self) -> String {
@@ -343,8 +343,8 @@ fn immediate_eval(source: &Grid, commands: &[Command]) -> Grid {
                 current = resized.place_on_canvas(
                     layout.canvas.width,
                     layout.canvas.height,
-                    layout.placement.0 as i32,
-                    layout.placement.1 as i32,
+                    layout.placement.0,
+                    layout.placement.1,
                 );
             }
             Command::Pad {
@@ -571,9 +571,8 @@ fn constrain_then_crop_center() {
     if let Some(msg) = &mismatch {
         eprintln!("EXPECTED MISMATCH (u32 placement can't go negative): {msg}");
     }
-    // This SHOULD match but currently doesn't due to u32 placement.
-    // Uncomment to see the failure:
-    assert!(mismatch.is_some(), "Expected mismatch for constrain→crop(center) but they matched — placement bug may be fixed");
+    // Fixed: i32 placement allows negative offsets.
+    assert!(mismatch.is_none(), "constrain→crop(center) should match now that placement is i32");
 }
 
 #[test]

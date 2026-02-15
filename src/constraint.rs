@@ -701,7 +701,7 @@ pub struct Layout {
     /// Final output canvas dimensions (≥ `resize_to`).
     pub canvas: Size,
     /// Top-left offset where the resized image sits on the canvas.
-    pub placement: (u32, u32),
+    pub placement: (i32, i32),
     /// Canvas background color (for padding areas).
     pub canvas_color: CanvasColor,
 }
@@ -866,10 +866,10 @@ fn combine_crops(user_crop: Option<Rect>, constraint_crop: Rect) -> Rect {
 }
 
 /// Compute placement offset for a resized image within a canvas.
-fn gravity_offset(cw: u32, ch: u32, iw: u32, ih: u32, gravity: &Gravity) -> (u32, u32) {
+fn gravity_offset(cw: u32, ch: u32, iw: u32, ih: u32, gravity: &Gravity) -> (i32, i32) {
     let x = gravity_offset_1d(cw.saturating_sub(iw), gravity, true);
     let y = gravity_offset_1d(ch.saturating_sub(ih), gravity, false);
-    (x, y)
+    (x as i32, y as i32)
 }
 
 fn gravity_offset_1d(space: u32, gravity: &Gravity, horizontal: bool) -> u32 {
@@ -1681,10 +1681,10 @@ mod tests {
                             if layout.source_crop.is_some() {
                                 failures.push(format!("{tag}: unexpected source_crop"));
                             }
-                            if px > 0 && py > 0 && px + rw < tw && py + rh < th {
+                            if px > 0 && py > 0 && px + rw as i32 > 0 && (px as u32) + rw < tw && (py as u32) + rh < th {
                                 failures.push(format!("{tag}: padding on all 4 sides"));
                             }
-                            if px + rw > tw || py + rh > th {
+                            if px as u32 + rw > tw || py as u32 + rh > th {
                                 failures.push(format!(
                                     "{tag}: placement overflow: ({px},{py})+({rw},{rh})>({tw},{th})"
                                 ));
@@ -1719,7 +1719,7 @@ mod tests {
                             if layout.source_crop.is_some() {
                                 failures.push(format!("{tag}: unexpected source_crop"));
                             }
-                            if px + rw > cw || py + rh > ch {
+                            if px as u32 + rw > cw || py as u32 + rh > ch {
                                 failures.push(format!(
                                     "{tag}: placement overflow: ({px},{py})+({rw},{rh})>({cw},{ch})"
                                 ));
@@ -2039,8 +2039,8 @@ mod tests {
             .gravity(Gravity::Percentage(2.0, 2.0))
             .compute(1000, 500)
             .unwrap();
-        let max_x = 400 - l.resize_to.width;
-        let max_y = 400 - l.resize_to.height;
+        let max_x = (400 - l.resize_to.width) as i32;
+        let max_y = (400 - l.resize_to.height) as i32;
         assert_eq!(l.placement, (max_x, max_y));
     }
 

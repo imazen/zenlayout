@@ -308,8 +308,8 @@ pub struct LayoutPlan {
     pub remaining_orientation: Orientation,
     /// Final canvas dimensions (may be extended for alignment).
     pub canvas: Size,
-    /// Placement offset on canvas.
-    pub placement: (u32, u32),
+    /// Placement offset on canvas (negative = content extends past top-left edge).
+    pub placement: (i32, i32),
     /// Canvas background color.
     pub canvas_color: CanvasColor,
     /// True when no resize is needed (enables lossless path).
@@ -635,14 +635,12 @@ impl OutputLimits {
 
                 // Clamp placement so image fits within canvas.
                 layout.placement = (
-                    layout
-                        .placement
-                        .0
-                        .min(cw.saturating_sub(layout.resize_to.width)),
-                    layout
-                        .placement
-                        .1
-                        .min(ch.saturating_sub(layout.resize_to.height)),
+                    layout.placement.0.min(
+                        (cw.saturating_sub(layout.resize_to.width)) as i32,
+                    ),
+                    layout.placement.1.min(
+                        (ch.saturating_sub(layout.resize_to.height)) as i32,
+                    ),
                 );
                 None
             }
@@ -652,7 +650,7 @@ impl OutputLimits {
                 let ch = if ny > 1 { oh.div_ceil(ny) * ny } else { oh };
 
                 if cw != ow || ch != oh {
-                    layout.placement = (0, 0);
+                    layout.placement = (0i32, 0i32);
                     layout.canvas = Size::new(cw, ch);
                     Some(Size::new(ow, oh))
                 } else {
@@ -679,13 +677,15 @@ impl OutputLimits {
                     layout.canvas.width = rw;
                     layout.placement.0 = 0;
                 } else {
-                    layout.placement.0 = (layout.canvas.width.saturating_sub(rw)) / 2;
+                    layout.placement.0 =
+                        (layout.canvas.width.saturating_sub(rw) / 2) as i32;
                 }
                 if layout.canvas.height == old_resize.height {
                     layout.canvas.height = rh;
                     layout.placement.1 = 0;
                 } else {
-                    layout.placement.1 = (layout.canvas.height.saturating_sub(rh)) / 2;
+                    layout.placement.1 =
+                        (layout.canvas.height.saturating_sub(rh) / 2) as i32;
                 }
                 None
             }
@@ -706,8 +706,8 @@ impl OutputLimits {
             (layout.canvas.height as f64 * scale).round().max(1.0) as u32,
         );
         layout.placement = (
-            (layout.placement.0 as f64 * scale).round() as u32,
-            (layout.placement.1 as f64 * scale).round() as u32,
+            (layout.placement.0 as f64 * scale).round() as i32,
+            (layout.placement.1 as f64 * scale).round() as i32,
         );
     }
 }
@@ -1366,25 +1366,23 @@ pub fn compute_layout_sequential(
     for op in &post_ops {
         match op {
             Command::Crop(sc) => {
-                // Post-constrain crop: trim the canvas
+                // Post-constrain crop: trim the canvas.
+                // Content shifts relative to new canvas origin.
                 let canvas_crop = sc.resolve(layout.canvas.width, layout.canvas.height);
-                // Adjust placement: content shifts relative to new canvas origin
-                let new_px = layout.placement.0.saturating_sub(canvas_crop.x);
-                let new_py = layout.placement.1.saturating_sub(canvas_crop.y);
+                layout.placement.0 -= canvas_crop.x as i32;
+                layout.placement.1 -= canvas_crop.y as i32;
                 layout.canvas = Size::new(canvas_crop.width, canvas_crop.height);
-                layout.placement = (new_px, new_py);
             }
             Command::Region(r) => {
-                // Post-constrain region: redefine canvas viewport
+                // Post-constrain region: redefine canvas viewport.
                 let (left, top, right, bottom) =
                     r.resolve(layout.canvas.width, layout.canvas.height);
                 let new_cw = right - left;
                 let new_ch = bottom - top;
                 if new_cw > 0 && new_ch > 0 {
-                    let new_px = layout.placement.0 as i32 - left;
-                    let new_py = layout.placement.1 as i32 - top;
+                    layout.placement.0 -= left;
+                    layout.placement.1 -= top;
                     layout.canvas = Size::new(new_cw as u32, new_ch as u32);
-                    layout.placement = (new_px.max(0) as u32, new_py.max(0) as u32);
                     layout.canvas_color = r.color;
                 }
             }
@@ -1399,7 +1397,8 @@ pub fn compute_layout_sequential(
                     layout.canvas.width + left + right,
                     layout.canvas.height + top + bottom,
                 );
-                layout.placement = (layout.placement.0 + left, layout.placement.1 + top);
+                layout.placement.0 += *left as i32;
+                layout.placement.1 += *top as i32;
                 layout.canvas_color = *color;
                 pad_applied = true;
             }
@@ -1533,7 +1532,10 @@ fn plan_from_parts(
                 layout.canvas.width + pad.left + pad.right,
                 layout.canvas.height + pad.top + pad.bottom,
             ),
-            placement: (layout.placement.0 + pad.left, layout.placement.1 + pad.top),
+            placement: (
+                layout.placement.0 + pad.left as i32,
+                layout.placement.1 + pad.top as i32,
+            ),
             canvas_color: pad.color,
             ..layout
         }
@@ -1655,8 +1657,8 @@ fn resolve_region(
 
             let new_canvas_w = (vw as f64 * scale_x).round().max(1.0) as u32;
             let new_canvas_h = (vh as f64 * scale_y).round().max(1.0) as u32;
-            let new_place_x = (place_x as f64 * scale_x).round() as u32;
-            let new_place_y = (place_y as f64 * scale_y).round() as u32;
+            let new_place_x = (place_x as f64 * scale_x).round() as i32;
+            let new_place_y = (place_y as f64 * scale_y).round() as i32;
 
             constrained.canvas = Size::new(new_canvas_w, new_canvas_h);
             constrained.placement = (new_place_x, new_place_y);
@@ -1670,7 +1672,7 @@ fn resolve_region(
             source_crop,
             resize_to: Size::new(overlap_w, overlap_h),
             canvas: Size::new(vw, vh),
-            placement: (place_x, place_y),
+            placement: (place_x as i32, place_y as i32),
             canvas_color: reg.color,
         })
     }
