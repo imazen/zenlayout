@@ -18,7 +18,7 @@
     .content { fill: #3a72a4; stroke: #5a9fd4; }
     .content-fill { fill: #3a72a4; }
     .discard { fill: #2c3d4d; stroke: #4a6070; }
-    .padding { fill: #1a1a1a; stroke: #444; }
+    .padding { fill: #fff; stroke: #666; }
     .extend-fill { fill: #2a4a65; stroke: #4a7a9e; }
     .arrow { stroke: #888; }
     .arrowhead { fill: #888; }
@@ -37,7 +37,7 @@
 <rect x="65.8" y="324.0" width="268.4" height="200.0" class="padding" rx="2"/>
 <rect x="65.8" y="324.0" width="263.5" height="197.7" class="content" rx="1"/>
 <text x="197.5" y="422.8" class="dim" text-anchor="middle" dominant-baseline="central">801×601</text>
-<text x="200" y="538.0" class="annotation" text-anchor="middle">place at (0, 0), bg Transparent</text>
+<text x="200" y="538.0" class="annotation" text-anchor="middle">place at (0, 0), bg transparent</text>
 <line x1="200" y1="532.0" x2="200" y2="566.0" class="arrow"/>
 <text x="200" y="588" class="label" text-anchor="middle">Extend  816×608</text>
 <rect x="65.8" y="596.0" width="268.4" height="200.0" class="content" rx="2"/>

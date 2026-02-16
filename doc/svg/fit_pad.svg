@@ -18,7 +18,7 @@
     .content { fill: #3a72a4; stroke: #5a9fd4; }
     .content-fill { fill: #3a72a4; }
     .discard { fill: #2c3d4d; stroke: #4a6070; }
-    .padding { fill: #1a1a1a; stroke: #444; }
+    .padding { fill: #fff; stroke: #666; }
     .extend-fill { fill: #2a4a65; stroke: #4a7a9e; }
     .arrow { stroke: #888; }
     .arrowhead { fill: #888; }
@@ -41,5 +41,5 @@
 <rect x="145.0" y="596.0" width="110.0" height="110.0" class="padding" rx="2"/>
 <rect x="145.0" y="619.9" width="110.0" height="61.9" class="content" rx="1"/>
 <text x="200.0" y="650.9" class="dim" text-anchor="middle" dominant-baseline="central">400×225</text>
-<text x="200" y="720.0" class="annotation" text-anchor="middle">place at (0, 87), bg Transparent</text>
+<text x="200" y="720.0" class="annotation" text-anchor="middle">place at (0, 87), bg transparent</text>
 </svg>

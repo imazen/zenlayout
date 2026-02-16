@@ -18,7 +18,7 @@
     .content { fill: #3a72a4; stroke: #5a9fd4; }
     .content-fill { fill: #3a72a4; }
     .discard { fill: #2c3d4d; stroke: #4a6070; }
-    .padding { fill: #1a1a1a; stroke: #444; }
+    .padding { fill: #fff; stroke: #666; }
     .extend-fill { fill: #2a4a65; stroke: #4a7a9e; }
     .arrow { stroke: #888; }
     .arrowhead { fill: #888; }

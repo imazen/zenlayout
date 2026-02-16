@@ -94,26 +94,55 @@ pub fn render_layout_svg(ideal: &IdealLayout, plan: &LayoutPlan) -> String {
 }
 
 /// Build the sequence of pipeline steps from layout results.
+///
+/// Pipeline order: Source (pre-orient) → Orient → Crop → Trim → Resize → Canvas → Extend.
+/// Source shows raw dimensions; Orient shows the post-orientation result;
+/// Crop/Trim are in post-orient space (which is how the user specifies them).
 fn build_steps(ideal: &IdealLayout, plan: &LayoutPlan) -> Vec<Step> {
     let mut steps = Vec::new();
     let layout = &ideal.layout;
+    let has_orient = !ideal.orientation.is_identity();
 
-    // Step 1: Source
+    // Source dimensions: pre-orient (raw image) when orientation is present,
+    // otherwise just layout.source.
+    let source_dims = if has_orient {
+        ideal
+            .orientation
+            .inverse()
+            .transform_dimensions(layout.source.width, layout.source.height)
+    } else {
+        layout.source
+    };
+
+    // Step 1: Source (pre-orient raw dimensions)
     steps.push(Step {
         label: String::from("Source"),
-        outer: layout.source,
+        outer: source_dims,
         outer_role: OuterRole::ContentFill,
         inner: None,
-        content_dims: layout.source,
-        annotation: if !ideal.orientation.is_identity() {
-            format!("EXIF {} ({:?})", ideal.orientation.to_exif(), ideal.orientation)
+        content_dims: source_dims,
+        annotation: if has_orient {
+            format!("{:?}", ideal.orientation)
         } else {
             String::new()
         },
         show_extension: None,
     });
 
-    // Step 2: Crop (if source_crop present in the layout)
+    // Step 2: Orient (post-orient dimensions — shows the dimension swap)
+    if has_orient {
+        steps.push(Step {
+            label: String::from("Orient"),
+            outer: layout.source,
+            outer_role: OuterRole::ContentFill,
+            inner: None,
+            content_dims: layout.source,
+            annotation: format!("{:?}", ideal.orientation),
+            show_extension: None,
+        });
+    }
+
+    // Step 3: Crop (in post-orient space — how the user specified it)
     if let Some(crop) = &layout.source_crop {
         let crop_size = Size::new(crop.width, crop.height);
         steps.push(Step {
@@ -132,7 +161,7 @@ fn build_steps(ideal: &IdealLayout, plan: &LayoutPlan) -> Vec<Step> {
         });
     }
 
-    // Step 3: Trim (only show when no Crop step — otherwise Trim is an
+    // Step 4: Trim (only show when no Crop step — otherwise Trim is an
     // implementation detail of decoder negotiation that repeats the crop info)
     if layout.source_crop.is_none() {
         if let Some(trim) = &plan.trim {
@@ -157,23 +186,6 @@ fn build_steps(ideal: &IdealLayout, plan: &LayoutPlan) -> Vec<Step> {
                 show_extension: None,
             });
         }
-    }
-
-    // Step 4: Orient (if not identity)
-    if !plan.remaining_orientation.is_identity() {
-        let effective = layout.effective_source();
-        let oriented =
-            plan.remaining_orientation
-                .transform_dimensions(effective.width, effective.height);
-        steps.push(Step {
-            label: String::from("Orient"),
-            outer: oriented,
-            outer_role: OuterRole::ContentFill,
-            inner: None,
-            content_dims: oriented,
-            annotation: format!("{:?}", plan.remaining_orientation),
-            show_extension: None,
-        });
     }
 
     // Step 5: Resize (if not identity)
@@ -203,7 +215,7 @@ fn build_steps(ideal: &IdealLayout, plan: &LayoutPlan) -> Vec<Step> {
                 h: plan.resize_to.height,
             }),
             content_dims: plan.resize_to,
-            annotation: format!("place at ({}, {}), bg {:?}", px, py, plan.canvas_color),
+            annotation: format!("place at ({}, {}), bg {}", px, py, format_color(&plan.canvas_color)),
             show_extension: None,
         });
     }
@@ -338,7 +350,7 @@ fn render_steps(steps: &[Step]) -> String {
     .content { fill: #3a72a4; stroke: #5a9fd4; }
     .content-fill { fill: #3a72a4; }
     .discard { fill: #2c3d4d; stroke: #4a6070; }
-    .padding { fill: #1a1a1a; stroke: #444; }
+    .padding { fill: #fff; stroke: #666; }
     .extend-fill { fill: #2a4a65; stroke: #4a7a9e; }
     .arrow { stroke: #888; }
     .arrowhead { fill: #888; }
@@ -504,6 +516,31 @@ fn render_steps(steps: &[Step]) -> String {
     svg
 }
 
+/// Format a CanvasColor concisely for annotations.
+fn format_color(color: &crate::constraint::CanvasColor) -> String {
+    use crate::constraint::CanvasColor;
+    match color {
+        CanvasColor::Transparent => String::from("transparent"),
+        CanvasColor::Srgb { r: 0, g: 0, b: 0, a: 255 } => String::from("black"),
+        CanvasColor::Srgb {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        } => String::from("white"),
+        CanvasColor::Srgb { r, g, b, a } => {
+            if *a == 255 {
+                format!("#{r:02x}{g:02x}{b:02x}")
+            } else {
+                format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
+            }
+        }
+        CanvasColor::Linear { r, g, b, a } => {
+            format!("linear({r:.2},{g:.2},{b:.2},{a:.2})")
+        }
+    }
+}
+
 /// Escape special characters for XML text content.
 fn escape_xml(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -657,7 +694,8 @@ mod tests {
     #[test]
     #[ignore] // run with: cargo test --features svg -- --ignored generate_sample_svgs --nocapture
     fn generate_sample_svgs() {
-        use crate::plan::{Align, OutputLimits};
+        use crate::constraint::CanvasColor;
+        use crate::plan::{Align, OutputLimits, Region, RegionCoord};
         let out = "/mnt/v/output/zenlayout/svg";
         let doc = concat!(env!("CARGO_MANIFEST_DIR"), "/doc/svg");
         std::fs::create_dir_all(out).unwrap();
@@ -728,6 +766,66 @@ mod tests {
                     .plan().unwrap();
                 let plan = ideal.finalize(&req, &DecoderOffer::full_decode(800, 600));
                 ("within_crop", render_layout_svg(&ideal, &plan))
+            },
+            // 9. Region viewport — mixed crop + pad
+            {
+                let (ideal, req) = Pipeline::new(800, 600)
+                    .region_viewport(-50, 0, 600, 600, CanvasColor::black())
+                    .plan().unwrap();
+                let plan = ideal.finalize(&req, &DecoderOffer::full_decode(800, 600));
+                ("region_viewport", render_layout_svg(&ideal, &plan))
+            },
+            // 10. Region pad — uniform padding
+            {
+                let (ideal, req) = Pipeline::new(800, 600)
+                    .region_pad(50, CanvasColor::white())
+                    .fit(450, 350)
+                    .plan().unwrap();
+                let plan = ideal.finalize(&req, &DecoderOffer::full_decode(800, 600));
+                ("region_pad", render_layout_svg(&ideal, &plan))
+            },
+            // 11. Region percentage crop
+            {
+                let reg = Region {
+                    left: RegionCoord::pct(0.1),
+                    top: RegionCoord::pct(0.1),
+                    right: RegionCoord::pct(0.9),
+                    bottom: RegionCoord::pct(0.9),
+                    color: CanvasColor::Transparent,
+                };
+                let (ideal, req) = Pipeline::new(1000, 500)
+                    .region(reg)
+                    .fit(400, 200)
+                    .plan().unwrap();
+                let plan = ideal.finalize(&req, &DecoderOffer::full_decode(1000, 500));
+                ("region_pct_crop", render_layout_svg(&ideal, &plan))
+            },
+            // 12. Rotate 90 + resize
+            {
+                let (ideal, req) = Pipeline::new(1920, 1080)
+                    .rotate_90()
+                    .fit(540, 960)
+                    .plan().unwrap();
+                let plan = ideal.finalize(&req, &DecoderOffer::full_decode(1920, 1080));
+                ("rotate_90", render_layout_svg(&ideal, &plan))
+            },
+            // 13. Rotate 180 (no dimension swap)
+            {
+                let (ideal, req) = Pipeline::new(800, 600)
+                    .rotate_180()
+                    .fit(400, 300)
+                    .plan().unwrap();
+                let plan = ideal.finalize(&req, &DecoderOffer::full_decode(800, 600));
+                ("rotate_180", render_layout_svg(&ideal, &plan))
+            },
+            // 14. Flip horizontal + resize
+            {
+                let (ideal, req) = Pipeline::new(800, 600)
+                    .flip_h()
+                    .fit(400, 300)
+                    .plan().unwrap();
+                let plan = ideal.finalize(&req, &DecoderOffer::full_decode(800, 600));
+                ("flip_h", render_layout_svg(&ideal, &plan))
             },
         ];
 

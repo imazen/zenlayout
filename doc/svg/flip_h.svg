@@ -30,16 +30,16 @@
   </marker>
 </defs>
 <text x="200" y="44" class="label" text-anchor="middle">Source</text>
-<rect x="75.0" y="52.0" width="250.0" height="200.0" class="content" rx="2"/>
-<text x="200.0" y="152.0" class="dim" text-anchor="middle" dominant-baseline="central">1000×800</text>
+<rect x="66.7" y="52.0" width="266.7" height="200.0" class="content" rx="2"/>
+<text x="200.0" y="152.0" class="dim" text-anchor="middle" dominant-baseline="central">800×600</text>
+<text x="200" y="266.0" class="annotation" text-anchor="middle">FlipH</text>
 <line x1="200" y1="260.0" x2="200" y2="294.0" class="arrow"/>
-<text x="200" y="316" class="label" text-anchor="middle">Crop</text>
-<rect x="75.0" y="324.0" width="250.0" height="200.0" class="discard" rx="2"/>
-<rect x="100.0" y="336.5" width="150.0" height="125.0" class="content" rx="1"/>
-<text x="175.0" y="399.0" class="dim" text-anchor="middle" dominant-baseline="central">600×500</text>
-<text x="200" y="538.0" class="annotation" text-anchor="middle">at (100, 50)</text>
+<text x="200" y="316" class="label" text-anchor="middle">Orient</text>
+<rect x="66.7" y="324.0" width="266.7" height="200.0" class="content" rx="2"/>
+<text x="200.0" y="424.0" class="dim" text-anchor="middle" dominant-baseline="central">800×600</text>
+<text x="200" y="538.0" class="annotation" text-anchor="middle">FlipH</text>
 <line x1="200" y1="532.0" x2="200" y2="566.0" class="arrow"/>
 <text x="200" y="588" class="label" text-anchor="middle">Resize</text>
-<rect x="134.0" y="596.0" width="132.0" height="110.0" class="content" rx="2"/>
-<text x="200.0" y="651.0" class="dim" text-anchor="middle" dominant-baseline="central">300×250</text>
+<rect x="126.7" y="596.0" width="146.7" height="110.0" class="content" rx="2"/>
+<text x="200.0" y="651.0" class="dim" text-anchor="middle" dominant-baseline="central">400×300</text>
 </svg>
