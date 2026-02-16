@@ -39,7 +39,7 @@ const MAX_PANEL_H: f64 = 200.0;
 /// Vertical gap between panels.
 const PANEL_GAP: f64 = 50.0;
 /// Horizontal margin.
-const MARGIN_X: f64 = 30.0;
+const MARGIN_X: f64 = 50.0;
 /// Top margin for first panel.
 const MARGIN_TOP: f64 = 30.0;
 /// Height of label text area above each panel.
@@ -114,27 +114,28 @@ fn build_steps(ideal: &IdealLayout, plan: &LayoutPlan) -> Vec<Step> {
         });
     }
 
-    // Step 3: Trim (if decoder overshoot needs trimming)
-    if let Some(trim) = &plan.trim {
-        // Infer decoder output from trim bounds (trim rect is in decoder output space).
-        // This is exact when trim + origin cover the full decoder output, and a
-        // conservative lower bound otherwise.
-        let decoder_dims = Size::new(trim.x + trim.width, trim.y + trim.height);
-        steps.push(Step {
-            label: format!("Trim  {}×{}", trim.width, trim.height),
-            outer: decoder_dims,
-            inner: Some(InnerRect {
-                x: trim.x as i32,
-                y: trim.y as i32,
-                w: trim.width,
-                h: trim.height,
-            }),
-            annotation: format!(
-                "decoder ≥{}×{} → trim at ({},{})",
-                decoder_dims.width, decoder_dims.height, trim.x, trim.y
-            ),
-            show_extension: None,
-        });
+    // Step 3: Trim (only show when no Crop step — otherwise Trim is an
+    // implementation detail of decoder negotiation that repeats the crop info)
+    if layout.source_crop.is_none() {
+        if let Some(trim) = &plan.trim {
+            let decoder_dims = Size::new(trim.x + trim.width, trim.y + trim.height);
+            steps.push(Step {
+                label: format!("Trim  {}×{}", trim.width, trim.height),
+                outer: decoder_dims,
+                inner: Some(InnerRect {
+                    x: trim.x as i32,
+                    y: trim.y as i32,
+                    w: trim.width,
+                    h: trim.height,
+                }),
+                annotation: if trim.x == 0 && trim.y == 0 {
+                    format!("from {}×{} decode", decoder_dims.width, decoder_dims.height)
+                } else {
+                    format!("offset ({},{}) in decode", trim.x, trim.y)
+                },
+                show_extension: None,
+            });
+        }
     }
 
     // Step 4: Orient (if not identity)
@@ -258,23 +259,34 @@ fn render_steps(steps: &[Step]) -> String {
     ));
     svg.push('\n');
 
-    // Style
+    // Style — light/dark mode via prefers-color-scheme
     svg.push_str(r##"<style>
-  .label { font: bold 13px monospace; fill: #333; }
-  .annotation { font: 11px monospace; fill: #666; }
+  text { font-family: "Consolas", "DejaVu Sans Mono", "Courier New", monospace; }
+  .label { font-size: 13px; font-weight: bold; fill: #333; }
+  .annotation { font-size: 11px; fill: #666; }
   .outer { fill: #e8e8e8; stroke: #999; stroke-width: 1; }
   .inner { fill: #6ba3d6; stroke: #2c6faa; stroke-width: 1.5; }
   .content-fill { fill: #6ba3d6; }
   .extend-fill { fill: #b8d4ee; stroke: #7baed0; stroke-width: 1; stroke-dasharray: 4,2; }
   .arrow { stroke: #666; stroke-width: 1.5; fill: none; marker-end: url(#arrowhead); }
-  .dim { font: 10px monospace; fill: #888; }
+  .arrowhead { fill: #666; }
+  @media (prefers-color-scheme: dark) {
+    .label { fill: #e0e0e0; }
+    .annotation { fill: #aaa; }
+    .outer { fill: #2d2d2d; stroke: #555; }
+    .inner { fill: #3a72a4; stroke: #5a9fd4; }
+    .content-fill { fill: #3a72a4; }
+    .extend-fill { fill: #2a4a65; stroke: #4a7a9e; }
+    .arrow { stroke: #888; }
+    .arrowhead { fill: #888; }
+  }
 </style>
 "##);
 
     // Arrow marker definition
     svg.push_str(r##"<defs>
   <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-    <polygon points="0 0, 8 3, 0 6" fill="#666"/>
+    <polygon points="0 0, 8 3, 0 6" class="arrowhead"/>
   </marker>
 </defs>
 "##);
@@ -517,58 +529,84 @@ mod tests {
     fn generate_sample_svgs() {
         use crate::plan::{Align, OutputLimits};
         let out = "/mnt/v/output/zenlayout/svg";
+        let doc = concat!(env!("CARGO_MANIFEST_DIR"), "/doc/svg");
         std::fs::create_dir_all(out).unwrap();
+        std::fs::create_dir_all(doc).unwrap();
 
-        // 1. Simple resize
-        let (ideal, req) = Pipeline::new(4000, 3000).fit(800, 600).plan().unwrap();
-        let plan = ideal.finalize(&req, &DecoderOffer::full_decode(4000, 3000));
-        std::fs::write(format!("{out}/01_simple_resize.svg"), render_layout_svg(&ideal, &plan)).unwrap();
+        let cases: Vec<(&str, String)> = vec![
+            // 1. Simple resize (most common operation)
+            {
+                let (ideal, req) = Pipeline::new(4000, 3000).fit(800, 600).plan().unwrap();
+                let plan = ideal.finalize(&req, &DecoderOffer::full_decode(4000, 3000));
+                ("fit", render_layout_svg(&ideal, &plan))
+            },
+            // 2. FitCrop — crop to different aspect ratio
+            {
+                let (ideal, req) = Pipeline::new(1920, 1080).fit_crop(500, 500).plan().unwrap();
+                let plan = ideal.finalize(&req, &DecoderOffer::full_decode(1920, 1080));
+                ("fit_crop", render_layout_svg(&ideal, &plan))
+            },
+            // 3. FitPad — letterbox into a square
+            {
+                let (ideal, req) = Pipeline::new(1600, 900).fit_pad(400, 400).plan().unwrap();
+                let plan = ideal.finalize(&req, &DecoderOffer::full_decode(1600, 900));
+                ("fit_pad", render_layout_svg(&ideal, &plan))
+            },
+            // 4. Explicit crop + resize
+            {
+                let (ideal, req) = Pipeline::new(1000, 800)
+                    .crop_pixels(100, 50, 600, 500)
+                    .fit(300, 250)
+                    .plan().unwrap();
+                let plan = ideal.finalize(&req, &DecoderOffer::full_decode(1000, 800));
+                ("crop_resize", render_layout_svg(&ideal, &plan))
+            },
+            // 5. EXIF orientation + resize
+            {
+                let (ideal, req) = Pipeline::new(4000, 3000)
+                    .auto_orient(6)
+                    .fit(600, 800)
+                    .plan().unwrap();
+                let plan = ideal.finalize(&req, &DecoderOffer::full_decode(4000, 3000));
+                ("orient_resize", render_layout_svg(&ideal, &plan))
+            },
+            // 6. Full pipeline — orient + crop + fit_pad
+            {
+                let (ideal, req) = Pipeline::new(4000, 3000)
+                    .auto_orient(6)
+                    .crop_pixels(200, 200, 2600, 2600)
+                    .fit_pad(800, 800)
+                    .plan().unwrap();
+                let plan = ideal.finalize(&req, &DecoderOffer::full_decode(4000, 3000));
+                ("orient_crop_pad", render_layout_svg(&ideal, &plan))
+            },
+            // 7. MCU edge extension
+            {
+                let (ideal, req) = Pipeline::new(801, 601)
+                    .output_limits(OutputLimits {
+                        max: None, min: None,
+                        align: Some(Align::uniform_extend(16)),
+                    })
+                    .plan().unwrap();
+                let plan = ideal.finalize(&req, &DecoderOffer::full_decode(801, 601));
+                ("mcu_extend", render_layout_svg(&ideal, &plan))
+            },
+            // 8. WithinCrop — downscale only, crop to target ratio
+            {
+                let (ideal, req) = Pipeline::new(800, 600)
+                    .within_crop(400, 400)
+                    .plan().unwrap();
+                let plan = ideal.finalize(&req, &DecoderOffer::full_decode(800, 600));
+                ("within_crop", render_layout_svg(&ideal, &plan))
+            },
+        ];
 
-        // 2. Crop + resize
-        let (ideal, req) = Pipeline::new(1000, 800)
-            .crop_pixels(100, 100, 600, 400)
-            .fit(300, 200)
-            .plan().unwrap();
-        let plan = ideal.finalize(&req, &DecoderOffer::full_decode(1000, 800));
-        std::fs::write(format!("{out}/02_crop_resize.svg"), render_layout_svg(&ideal, &plan)).unwrap();
+        for (name, svg) in &cases {
+            std::fs::write(format!("{out}/{name}.svg"), svg).unwrap();
+            std::fs::write(format!("{doc}/{name}.svg"), svg).unwrap();
+        }
 
-        // 3. Orient + crop + fit_pad (complex)
-        let (ideal, req) = Pipeline::new(4000, 3000)
-            .auto_orient(6)
-            .crop_pixels(200, 200, 3000, 2000)
-            .fit_pad(800, 800)
-            .plan().unwrap();
-        let plan = ideal.finalize(&req, &DecoderOffer::full_decode(4000, 3000));
-        std::fs::write(format!("{out}/03_orient_crop_pad.svg"), render_layout_svg(&ideal, &plan)).unwrap();
-
-        // 4. FitCrop
-        let (ideal, req) = Pipeline::new(1920, 1080)
-            .fit_crop(500, 500)
-            .plan().unwrap();
-        let plan = ideal.finalize(&req, &DecoderOffer::full_decode(1920, 1080));
-        std::fs::write(format!("{out}/04_fit_crop.svg"), render_layout_svg(&ideal, &plan)).unwrap();
-
-        // 5. MCU alignment edge extension
-        let (ideal, req) = Pipeline::new(801, 601)
-            .output_limits(OutputLimits { max: None, min: None, align: Some(Align::uniform_extend(16)) })
-            .plan().unwrap();
-        let plan = ideal.finalize(&req, &DecoderOffer::full_decode(801, 601));
-        std::fs::write(format!("{out}/05_edge_extend.svg"), render_layout_svg(&ideal, &plan)).unwrap();
-
-        // 6. Identity (passthrough)
-        let (ideal, req) = Pipeline::new(640, 480).plan().unwrap();
-        let plan = ideal.finalize(&req, &DecoderOffer::full_decode(640, 480));
-        std::fs::write(format!("{out}/06_identity.svg"), render_layout_svg(&ideal, &plan)).unwrap();
-
-        // 7. Orientation with resize
-        let (ideal, req) = Pipeline::new(600, 400)
-            .auto_orient(8) // Rotate270
-            .fit(200, 300)
-            .plan().unwrap();
-        let plan = ideal.finalize(&req, &DecoderOffer::full_decode(600, 400));
-        std::fs::write(format!("{out}/07_orient_resize.svg"), render_layout_svg(&ideal, &plan)).unwrap();
-
-        println!("Generated 7 SVGs in {out}");
+        println!("Generated {} SVGs in {out} and {doc}", cases.len());
     }
 
     #[test]
