@@ -299,9 +299,13 @@ impl Size {
 /// Axis-aligned rectangle in pixel coordinates.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Rect {
+    /// Left edge (pixels from origin).
     pub x: u32,
+    /// Top edge (pixels from origin).
     pub y: u32,
+    /// Width in pixels.
     pub width: u32,
+    /// Height in pixels.
     pub height: u32,
 }
 
@@ -358,11 +362,17 @@ impl Rect {
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct Constraint {
+    /// How the image is fitted to the target dimensions.
     pub mode: ConstraintMode,
+    /// Target width (pixels). `None` = unconstrained on this axis.
     pub width: Option<u32>,
+    /// Target height (pixels). `None` = unconstrained on this axis.
     pub height: Option<u32>,
+    /// Anchor point for crop and pad operations.
     pub gravity: Gravity,
+    /// Background fill for padding regions.
     pub canvas_color: CanvasColor,
+    /// Pre-constraint crop applied to the source image.
     pub source_crop: Option<SourceCrop>,
 }
 

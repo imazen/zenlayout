@@ -7,6 +7,7 @@
 //! - [`constraint`] — Constraint modes (Fit, Within, FitCrop, etc.) and layout computation
 //! - [`orientation`] — EXIF orientation, D4 dihedral group, coordinate transforms
 //! - [`plan`] — Command pipeline, decoder negotiation, two-phase layout planning
+//! - [`svg`] — SVG visualization of layout pipeline steps (requires `svg` feature)
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
@@ -14,6 +15,8 @@
 pub mod constraint;
 pub mod orientation;
 pub mod plan;
+#[cfg(feature = "svg")]
+pub mod svg;
 
 // Re-exports: core types from constraint module
 pub use constraint::{
