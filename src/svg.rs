@@ -44,20 +44,33 @@ const MARGIN_X: f64 = 50.0;
 const MARGIN_TOP: f64 = 30.0;
 /// Height of label text area above each panel.
 const LABEL_H: f64 = 22.0;
-/// Arrow height between panels.
-const ARROW_H: f64 = 28.0;
+
+/// What the outer (background) area of a panel represents.
+#[derive(Copy, Clone, PartialEq)]
+enum OuterRole {
+    /// Content fills the entire panel (Source, Resize, Orient).
+    ContentFill,
+    /// Outer area is discarded image (Crop, Trim — faded blue).
+    ImageDiscard,
+    /// Outer area is added padding (Canvas — white).
+    Padding,
+}
 
 /// A single step in the pipeline visualization.
 struct Step {
     label: String,
-    /// The overall bounding box (e.g., the canvas).
+    /// The overall bounding box.
     outer: Size,
-    /// The inner content rect within the outer box (for showing crop/placement).
+    /// What the outer area represents visually.
+    outer_role: OuterRole,
+    /// The inner content rect within the outer box.
     /// None means the content fills the entire outer box.
     inner: Option<InnerRect>,
-    /// Optional annotation text below the label.
+    /// Content dimensions to show centered inside the blue box.
+    content_dims: Size,
+    /// Optional annotation text below the panel.
     annotation: String,
-    /// If true, show a hatch pattern for the extension area.
+    /// If Some, show edge-extension areas for this content size.
     show_extension: Option<Size>,
 }
 
@@ -87,9 +100,11 @@ fn build_steps(ideal: &IdealLayout, plan: &LayoutPlan) -> Vec<Step> {
 
     // Step 1: Source
     steps.push(Step {
-        label: format!("Source  {}×{}", layout.source.width, layout.source.height),
+        label: String::from("Source"),
         outer: layout.source,
+        outer_role: OuterRole::ContentFill,
         inner: None,
+        content_dims: layout.source,
         annotation: if !ideal.orientation.is_identity() {
             format!("EXIF {} ({:?})", ideal.orientation.to_exif(), ideal.orientation)
         } else {
@@ -100,15 +115,18 @@ fn build_steps(ideal: &IdealLayout, plan: &LayoutPlan) -> Vec<Step> {
 
     // Step 2: Crop (if source_crop present in the layout)
     if let Some(crop) = &layout.source_crop {
+        let crop_size = Size::new(crop.width, crop.height);
         steps.push(Step {
-            label: format!("Crop  {}×{}", crop.width, crop.height),
+            label: String::from("Crop"),
             outer: layout.source,
+            outer_role: OuterRole::ImageDiscard,
             inner: Some(InnerRect {
                 x: crop.x as i32,
                 y: crop.y as i32,
                 w: crop.width,
                 h: crop.height,
             }),
+            content_dims: crop_size,
             annotation: format!("at ({}, {})", crop.x, crop.y),
             show_extension: None,
         });
@@ -119,15 +137,18 @@ fn build_steps(ideal: &IdealLayout, plan: &LayoutPlan) -> Vec<Step> {
     if layout.source_crop.is_none() {
         if let Some(trim) = &plan.trim {
             let decoder_dims = Size::new(trim.x + trim.width, trim.y + trim.height);
+            let trim_size = Size::new(trim.width, trim.height);
             steps.push(Step {
-                label: format!("Trim  {}×{}", trim.width, trim.height),
+                label: String::from("Trim"),
                 outer: decoder_dims,
+                outer_role: OuterRole::ImageDiscard,
                 inner: Some(InnerRect {
                     x: trim.x as i32,
                     y: trim.y as i32,
                     w: trim.width,
                     h: trim.height,
                 }),
+                content_dims: trim_size,
                 annotation: if trim.x == 0 && trim.y == 0 {
                     format!("from {}×{} decode", decoder_dims.width, decoder_dims.height)
                 } else {
@@ -141,11 +162,15 @@ fn build_steps(ideal: &IdealLayout, plan: &LayoutPlan) -> Vec<Step> {
     // Step 4: Orient (if not identity)
     if !plan.remaining_orientation.is_identity() {
         let effective = layout.effective_source();
-        let oriented = plan.remaining_orientation.transform_dimensions(effective.width, effective.height);
+        let oriented =
+            plan.remaining_orientation
+                .transform_dimensions(effective.width, effective.height);
         steps.push(Step {
-            label: format!("Orient  {}×{}", oriented.width, oriented.height),
+            label: String::from("Orient"),
             outer: oriented,
+            outer_role: OuterRole::ContentFill,
             inner: None,
+            content_dims: oriented,
             annotation: format!("{:?}", plan.remaining_orientation),
             show_extension: None,
         });
@@ -154,9 +179,11 @@ fn build_steps(ideal: &IdealLayout, plan: &LayoutPlan) -> Vec<Step> {
     // Step 5: Resize (if not identity)
     if !plan.resize_is_identity {
         steps.push(Step {
-            label: format!("Resize  {}×{}", plan.resize_to.width, plan.resize_to.height),
+            label: String::from("Resize"),
             outer: plan.resize_to,
+            outer_role: OuterRole::ContentFill,
             inner: None,
+            content_dims: plan.resize_to,
             annotation: String::new(),
             show_extension: None,
         });
@@ -168,16 +195,15 @@ fn build_steps(ideal: &IdealLayout, plan: &LayoutPlan) -> Vec<Step> {
         steps.push(Step {
             label: format!("Canvas  {}×{}", plan.canvas.width, plan.canvas.height),
             outer: plan.canvas,
+            outer_role: OuterRole::Padding,
             inner: Some(InnerRect {
                 x: px,
                 y: py,
                 w: plan.resize_to.width,
                 h: plan.resize_to.height,
             }),
-            annotation: format!(
-                "place at ({}, {}), bg {:?}",
-                px, py, plan.canvas_color
-            ),
+            content_dims: plan.resize_to,
+            annotation: format!("place at ({}, {}), bg {:?}", px, py, plan.canvas_color),
             show_extension: None,
         });
     }
@@ -187,13 +213,15 @@ fn build_steps(ideal: &IdealLayout, plan: &LayoutPlan) -> Vec<Step> {
         steps.push(Step {
             label: format!("Extend  {}×{}", plan.canvas.width, plan.canvas.height),
             outer: plan.canvas,
+            outer_role: OuterRole::ContentFill,
             inner: Some(InnerRect {
                 x: 0,
                 y: 0,
                 w: content.width,
                 h: content.height,
             }),
-            annotation: format!("content {}×{}, edges replicated", content.width, content.height),
+            content_dims: content,
+            annotation: format!("edges replicated to {}×{}", plan.canvas.width, plan.canvas.height),
             show_extension: Some(content),
         });
     }
@@ -202,13 +230,15 @@ fn build_steps(ideal: &IdealLayout, plan: &LayoutPlan) -> Vec<Step> {
     let final_size = plan.canvas;
     let last = steps.last().map(|s| &s.label);
     let already_final = last.is_some_and(|l| {
-        l.starts_with("Canvas") || l.starts_with("Extend") || l.starts_with("Resize")
+        l.starts_with("Canvas") || l.starts_with("Extend") || l == "Resize"
     });
     if !already_final || steps.len() == 1 {
         steps.push(Step {
-            label: format!("Output  {}×{}", final_size.width, final_size.height),
+            label: String::from("Output"),
             outer: final_size,
+            outer_role: OuterRole::ContentFill,
             inner: None,
+            content_dims: final_size,
             annotation: String::new(),
             show_extension: None,
         });
@@ -217,15 +247,26 @@ fn build_steps(ideal: &IdealLayout, plan: &LayoutPlan) -> Vec<Step> {
     steps
 }
 
-/// Scale a Size to fit within MAX_PANEL_W × MAX_PANEL_H, preserving aspect ratio.
-fn scale_to_fit(size: Size) -> (f64, f64, f64) {
+/// Scale a Size to fit within the panel bounds, with a relative size factor.
+///
+/// `rel` is 0.0..=1.0 — the panel shrinks proportionally to show that this
+/// step produces smaller output than the largest step. Clamped to at least 0.5
+/// so the smallest panels remain readable.
+fn scale_to_fit(size: Size, rel: f64) -> (f64, f64, f64) {
     let w = size.width as f64;
     let h = size.height as f64;
     if w == 0.0 || h == 0.0 {
         return (1.0, 1.0, 1.0);
     }
-    let scale = (MAX_PANEL_W / w).min(MAX_PANEL_H / h);
+    let max_w = MAX_PANEL_W * rel;
+    let max_h = MAX_PANEL_H * rel;
+    let scale = (max_w / w).min(max_h / h);
     (w * scale, h * scale, scale)
+}
+
+/// Compute the pixel area of a Size (for relative sizing).
+fn pixel_area(size: Size) -> f64 {
+    size.width as f64 * size.height as f64
 }
 
 /// Render step panels into a complete SVG document.
@@ -234,13 +275,31 @@ fn render_steps(steps: &[Step]) -> String {
         return String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>"#);
     }
 
+    // Compute relative size for each step.
+    // Use the sqrt of area ratio so a 4× area difference shows as ~2× visual shrink.
+    // Clamp to 0.55..1.0 so the smallest panels are still clearly readable.
+    let max_area = steps
+        .iter()
+        .map(|s| pixel_area(s.outer))
+        .fold(0.0_f64, f64::max);
+    let rel_sizes: Vec<f64> = steps
+        .iter()
+        .map(|s| {
+            if max_area <= 0.0 {
+                1.0
+            } else {
+                (pixel_area(s.outer) / max_area).sqrt().clamp(0.55, 1.0)
+            }
+        })
+        .collect();
+
     // Calculate total height
     let mut total_h = MARGIN_TOP;
     for (i, _step) in steps.iter().enumerate() {
         total_h += LABEL_H;
         total_h += MAX_PANEL_H;
         if i < steps.len() - 1 {
-            total_h += ARROW_H + PANEL_GAP - ARROW_H; // gap includes arrow space
+            total_h += PANEL_GAP;
         }
     }
     total_h += MARGIN_TOP; // bottom margin
@@ -263,19 +322,23 @@ fn render_steps(steps: &[Step]) -> String {
     svg.push_str(r##"<style>
   text { font-family: "Consolas", "DejaVu Sans Mono", "Courier New", monospace; }
   .label { font-size: 13px; font-weight: bold; fill: #333; }
+  .dim { font-size: 11px; font-weight: bold; fill: #1a4a70; }
   .annotation { font-size: 11px; fill: #666; }
-  .outer { fill: #e8e8e8; stroke: #999; stroke-width: 1; }
-  .inner { fill: #6ba3d6; stroke: #2c6faa; stroke-width: 1.5; }
+  .content { fill: #6ba3d6; stroke: #2c6faa; stroke-width: 1.5; }
   .content-fill { fill: #6ba3d6; }
+  .discard { fill: #c5d5e4; stroke: #9ab0c5; stroke-width: 1; }
+  .padding { fill: #fff; stroke: #bbb; stroke-width: 1; }
   .extend-fill { fill: #b8d4ee; stroke: #7baed0; stroke-width: 1; stroke-dasharray: 4,2; }
   .arrow { stroke: #666; stroke-width: 1.5; fill: none; marker-end: url(#arrowhead); }
   .arrowhead { fill: #666; }
   @media (prefers-color-scheme: dark) {
     .label { fill: #e0e0e0; }
+    .dim { fill: #9dc4e8; }
     .annotation { fill: #aaa; }
-    .outer { fill: #2d2d2d; stroke: #555; }
-    .inner { fill: #3a72a4; stroke: #5a9fd4; }
+    .content { fill: #3a72a4; stroke: #5a9fd4; }
     .content-fill { fill: #3a72a4; }
+    .discard { fill: #2c3d4d; stroke: #4a6070; }
+    .padding { fill: #1a1a1a; stroke: #444; }
     .extend-fill { fill: #2a4a65; stroke: #4a7a9e; }
     .arrow { stroke: #888; }
     .arrowhead { fill: #888; }
@@ -294,7 +357,7 @@ fn render_steps(steps: &[Step]) -> String {
     let mut y = MARGIN_TOP;
     let center_x = total_w / 2.0;
 
-    for (i, step) in steps.iter().enumerate() {
+    for (i, (step, &rel)) in steps.iter().zip(rel_sizes.iter()).enumerate() {
         // Label
         svg.push_str(&format!(
             r#"<text x="{}" y="{}" class="label" text-anchor="middle">{}</text>"#,
@@ -306,68 +369,109 @@ fn render_steps(steps: &[Step]) -> String {
         y += LABEL_H;
 
         // Panel
-        let (sw, sh, scale) = scale_to_fit(step.outer);
+        let (sw, sh, scale) = scale_to_fit(step.outer, rel);
         let panel_x = center_x - sw / 2.0;
         let panel_y = y;
 
-        // Outer box (canvas / source background)
-        svg.push_str(&format!(
-            r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" class="outer" rx="2"/>"#,
-            panel_x, panel_y, sw, sh
-        ));
-        svg.push('\n');
+        // Outer box — class depends on what the surrounding area represents
+        let outer_class = match step.outer_role {
+            OuterRole::ContentFill => "content",
+            OuterRole::ImageDiscard => "discard",
+            OuterRole::Padding => "padding",
+        };
 
-        // Inner rect (crop region / placed content)
-        if let Some(inner) = &step.inner {
-            let ix = panel_x + inner.x as f64 * scale;
-            let iy = panel_y + inner.y as f64 * scale;
-            let iw = inner.w as f64 * scale;
-            let ih = inner.h as f64 * scale;
-
-            if let Some(content) = step.show_extension {
-                // Extension panel: show content area and extend area differently
-                let cw = content.width as f64 * scale;
-                let ch = content.height as f64 * scale;
-
-                // Content area
-                svg.push_str(&format!(
-                    r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" class="content-fill"/>"#,
-                    panel_x, panel_y, cw, ch
-                ));
-                svg.push('\n');
-
-                // Right extension
-                if cw < sw {
-                    svg.push_str(&format!(
-                        r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" class="extend-fill"/>"#,
-                        panel_x + cw, panel_y, sw - cw, ch
-                    ));
-                    svg.push('\n');
-                }
-
-                // Bottom extension (full width)
-                if ch < sh {
-                    svg.push_str(&format!(
-                        r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" class="extend-fill"/>"#,
-                        panel_x, panel_y + ch, sw, sh - ch
-                    ));
-                    svg.push('\n');
-                }
-            } else {
-                // Normal inner rect (crop highlight or placed content)
-                svg.push_str(&format!(
-                    r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" class="inner" rx="1"/>"#,
-                    ix, iy, iw, ih
-                ));
-                svg.push('\n');
-            }
-        } else if step.show_extension.is_none() {
-            // No inner rect — fill the whole panel as content
+        // For ContentFill with no inner, the outer IS the content box.
+        // For ImageDiscard/Padding, draw the outer as background first.
+        if step.outer_role == OuterRole::ContentFill && step.inner.is_none() && step.show_extension.is_none() {
+            // Single content rect fills the whole panel
             svg.push_str(&format!(
-                r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" class="inner" rx="2"/>"#,
+                r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" class="content" rx="2"/>"#,
                 panel_x, panel_y, sw, sh
             ));
             svg.push('\n');
+
+            // Dimension text centered in content
+            let dims = format!("{}×{}", step.content_dims.width, step.content_dims.height);
+            svg.push_str(&format!(
+                r#"<text x="{:.1}" y="{:.1}" class="dim" text-anchor="middle" dominant-baseline="central">{}</text>"#,
+                panel_x + sw / 2.0,
+                panel_y + sh / 2.0,
+                dims
+            ));
+            svg.push('\n');
+        } else {
+            // Draw outer background
+            svg.push_str(&format!(
+                r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" class="{}" rx="2"/>"#,
+                panel_x, panel_y, sw, sh, outer_class
+            ));
+            svg.push('\n');
+
+            // Inner rect (crop region / placed content / extension)
+            if let Some(inner) = &step.inner {
+                let ix = panel_x + inner.x as f64 * scale;
+                let iy = panel_y + inner.y as f64 * scale;
+                let iw = inner.w as f64 * scale;
+                let ih = inner.h as f64 * scale;
+
+                if let Some(content) = step.show_extension {
+                    // Extension panel: content area + dashed extension areas
+                    let cw = content.width as f64 * scale;
+                    let ch = content.height as f64 * scale;
+
+                    // Content area
+                    svg.push_str(&format!(
+                        r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" class="content-fill"/>"#,
+                        panel_x, panel_y, cw, ch
+                    ));
+                    svg.push('\n');
+
+                    // Right extension
+                    if cw < sw {
+                        svg.push_str(&format!(
+                            r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" class="extend-fill"/>"#,
+                            panel_x + cw, panel_y, sw - cw, ch
+                        ));
+                        svg.push('\n');
+                    }
+
+                    // Bottom extension (full width)
+                    if ch < sh {
+                        svg.push_str(&format!(
+                            r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" class="extend-fill"/>"#,
+                            panel_x, panel_y + ch, sw, sh - ch
+                        ));
+                        svg.push('\n');
+                    }
+
+                    // Dimension text centered in content area
+                    let dims = format!("{}×{}", content.width, content.height);
+                    svg.push_str(&format!(
+                        r#"<text x="{:.1}" y="{:.1}" class="dim" text-anchor="middle" dominant-baseline="central">{}</text>"#,
+                        panel_x + cw / 2.0,
+                        panel_y + ch / 2.0,
+                        dims
+                    ));
+                    svg.push('\n');
+                } else {
+                    // Normal inner rect (crop highlight or placed content)
+                    svg.push_str(&format!(
+                        r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" class="content" rx="1"/>"#,
+                        ix, iy, iw, ih
+                    ));
+                    svg.push('\n');
+
+                    // Dimension text centered in inner rect
+                    let dims = format!("{}×{}", step.content_dims.width, step.content_dims.height);
+                    svg.push_str(&format!(
+                        r#"<text x="{:.1}" y="{:.1}" class="dim" text-anchor="middle" dominant-baseline="central">{}</text>"#,
+                        ix + iw / 2.0,
+                        iy + ih / 2.0,
+                        dims
+                    ));
+                    svg.push('\n');
+                }
+            }
         }
 
         // Annotation
@@ -481,7 +585,6 @@ mod tests {
 
     #[test]
     fn svg_output_matches_plan_canvas() {
-        // Test that the final step dimensions match plan.canvas
         let (ideal, req) = Pipeline::new(4000, 3000)
             .auto_orient(6)
             .crop_pixels(200, 200, 3000, 2000)
@@ -494,7 +597,6 @@ mod tests {
 
         let svg = render_layout_svg(&ideal, &plan);
 
-        // The SVG should contain the final canvas dimensions
         let final_dim = format!("{}×{}", plan.canvas.width, plan.canvas.height);
         assert!(
             svg.contains(&final_dim),
@@ -521,7 +623,35 @@ mod tests {
         assert!(plan.content_size.is_some());
         let svg = render_layout_svg(&ideal, &plan);
         assert!(svg.contains("Extend"));
-        assert!(svg.contains("content"));
+        assert!(svg.contains("801×601"));
+    }
+
+    #[test]
+    fn svg_discard_class_for_crop() {
+        let (ideal, req) = Pipeline::new(800, 600)
+            .crop_pixels(100, 100, 400, 300)
+            .plan()
+            .unwrap();
+
+        let offer = DecoderOffer::full_decode(800, 600);
+        let plan = ideal.finalize(&req, &offer);
+
+        let svg = render_layout_svg(&ideal, &plan);
+        assert!(svg.contains("class=\"discard\""), "Crop outer should use discard class");
+    }
+
+    #[test]
+    fn svg_padding_class_for_canvas() {
+        let (ideal, req) = Pipeline::new(200, 100)
+            .fit_pad(100, 100)
+            .plan()
+            .unwrap();
+
+        let offer = DecoderOffer::full_decode(200, 100);
+        let plan = ideal.finalize(&req, &offer);
+
+        let svg = render_layout_svg(&ideal, &plan);
+        assert!(svg.contains("class=\"padding\""), "Canvas outer should use padding class");
     }
 
     #[test]
@@ -626,7 +756,6 @@ mod tests {
         // Basic XML validity checks
         assert!(svg.starts_with("<svg"));
         assert!(svg.contains("</svg>"));
-        // No unescaped angle brackets in text
         assert!(!svg.contains("<<"));
     }
 }
