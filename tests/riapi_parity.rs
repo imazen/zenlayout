@@ -669,9 +669,11 @@ mod parsing {
         );
         assert_eq!(result.instructions.extras().get("format").map(String::as_str), Some("webp"));
         assert_eq!(result.instructions.extras().get("quality").map(String::as_str), Some("80"));
+        // decoder.min_precise_scaling_ratio is a first-class field, not in extras
+        assert_eq!(result.instructions.min_precise_scaling_ratio, Some(3.5));
         assert_eq!(
-            result.instructions.extras().get("decoder.min_precise_scaling_ratio").map(String::as_str),
-            Some("3.5")
+            result.instructions.extras().get("decoder.min_precise_scaling_ratio"),
+            None
         );
         assert_eq!(
             result.instructions.extras().get("f.sharpen").map(String::as_str),

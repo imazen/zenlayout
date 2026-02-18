@@ -78,10 +78,7 @@ impl RegionCoord {
 
     /// Coordinate at a percentage of source dimension.
     pub const fn pct(percent: f32) -> Self {
-        Self {
-            percent,
-            pixels: 0,
-        }
+        Self { percent, pixels: 0 }
     }
 
     /// Coordinate at a percentage plus pixel offset.
@@ -280,7 +277,7 @@ impl Padding {
 }
 
 /// What the layout engine wants the decoder to do.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug)]
 pub struct DecoderRequest {
     /// Crop region in pre-orientation source coordinates.
     pub crop: Option<Rect>,
@@ -288,6 +285,37 @@ pub struct DecoderRequest {
     pub target_size: Size,
     /// Orientation the engine would like the decoder to handle.
     pub orientation: Orientation,
+    /// Minimum ratio at which decoder-integrated downscaling (e.g. JPEG IDCT)
+    /// is considered precise enough. Below this ratio, the decoder should
+    /// decode at a larger size and let the resize engine handle scaling.
+    ///
+    /// For example, with `min_precise_scaling_ratio = Some(2.1)`, a JPEG
+    /// decoder with 1/2 IDCT downscaling (ratio 2.0) should skip it and
+    /// decode at full size, while 1/4 (ratio 4.0) is fine.
+    ///
+    /// `None` means the caller has no preference — use the decoder's default.
+    pub min_precise_scaling_ratio: Option<f64>,
+}
+
+impl PartialEq for DecoderRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.crop == other.crop
+            && self.target_size == other.target_size
+            && self.orientation == other.orientation
+            && self.min_precise_scaling_ratio.map(f64::to_bits)
+                == other.min_precise_scaling_ratio.map(f64::to_bits)
+    }
+}
+
+impl Eq for DecoderRequest {}
+
+impl core::hash::Hash for DecoderRequest {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.crop.hash(state);
+        self.target_size.hash(state);
+        self.orientation.hash(state);
+        self.min_precise_scaling_ratio.map(f64::to_bits).hash(state);
+    }
 }
 
 /// What the decoder actually did.
@@ -653,12 +681,14 @@ impl OutputLimits {
 
                 // Clamp placement so image fits within canvas.
                 layout.placement = (
-                    layout.placement.0.min(
-                        (cw.saturating_sub(layout.resize_to.width)) as i32,
-                    ),
-                    layout.placement.1.min(
-                        (ch.saturating_sub(layout.resize_to.height)) as i32,
-                    ),
+                    layout
+                        .placement
+                        .0
+                        .min((cw.saturating_sub(layout.resize_to.width)) as i32),
+                    layout
+                        .placement
+                        .1
+                        .min((ch.saturating_sub(layout.resize_to.height)) as i32),
                 );
                 None
             }
@@ -695,15 +725,13 @@ impl OutputLimits {
                     layout.canvas.width = rw;
                     layout.placement.0 = 0;
                 } else {
-                    layout.placement.0 =
-                        (layout.canvas.width.saturating_sub(rw) / 2) as i32;
+                    layout.placement.0 = (layout.canvas.width.saturating_sub(rw) / 2) as i32;
                 }
                 if layout.canvas.height == old_resize.height {
                     layout.canvas.height = rh;
                     layout.placement.1 = 0;
                 } else {
-                    layout.placement.1 =
-                        (layout.canvas.height.saturating_sub(rh) / 2) as i32;
+                    layout.placement.1 = (layout.canvas.height.saturating_sub(rh) / 2) as i32;
                 }
                 None
             }
@@ -772,6 +800,7 @@ pub struct Pipeline {
     constraint: Option<Constraint>,
     padding: Option<Padding>,
     limits: Option<OutputLimits>,
+    min_precise_scaling_ratio: Option<f64>,
 }
 
 impl Pipeline {
@@ -785,6 +814,7 @@ impl Pipeline {
             constraint: None,
             padding: None,
             limits: None,
+            min_precise_scaling_ratio: None,
         }
     }
 
@@ -985,7 +1015,14 @@ impl Pipeline {
     /// never collapse or merge (unlike CSS margins).
     ///
     /// Replaces any previous padding.
-    pub fn pad_sides(self, top: u32, right: u32, bottom: u32, left: u32, color: CanvasColor) -> Self {
+    pub fn pad_sides(
+        self,
+        top: u32,
+        right: u32,
+        bottom: u32,
+        left: u32,
+        color: CanvasColor,
+    ) -> Self {
         self.pad(Padding::new(top, right, bottom, left, color))
     }
 
@@ -994,6 +1031,16 @@ impl Pipeline {
     /// Replaces any previous padding.
     pub fn pad_uniform(self, amount: u32, color: CanvasColor) -> Self {
         self.pad(Padding::uniform(amount, color))
+    }
+
+    /// Set the minimum scaling ratio for precise decoder downscaling.
+    ///
+    /// This value is passed through to [`DecoderRequest::min_precise_scaling_ratio`]
+    /// so the decoder consumer knows when to avoid built-in downscaling
+    /// (e.g. JPEG IDCT) in favor of a higher-quality resize engine.
+    pub fn min_precise_scaling_ratio(mut self, ratio: f64) -> Self {
+        self.min_precise_scaling_ratio = Some(ratio);
+        self
     }
 
     /// Apply safety limits after layout computation.
@@ -1014,7 +1061,7 @@ impl Pipeline {
             Some(SourceRegion::Region(r)) => (None, Some(r)),
             None => (None, None),
         };
-        plan_from_parts(
+        let (ideal, mut request) = plan_from_parts(
             self.source_w,
             self.source_h,
             self.orientation,
@@ -1023,7 +1070,9 @@ impl Pipeline {
             self.constraint.as_ref(),
             self.padding,
             self.limits.as_ref(),
-        )
+        )?;
+        request.min_precise_scaling_ratio = self.min_precise_scaling_ratio;
+        Ok((ideal, request))
     }
 }
 
@@ -1164,6 +1213,7 @@ impl IdealLayout {
             crop: secondary_crop,
             target_size: Size::new(target_w, target_h),
             orientation: self.orientation,
+            min_precise_scaling_ratio: None,
         };
 
         (sec_ideal, sec_request)
@@ -1471,13 +1521,10 @@ pub fn compute_layout_sequential(
     // Build padding record for IdealLayout
     let padding = if pad_applied {
         // Find the last pad command
-        post_ops
-            .iter()
-            .rev()
-            .find_map(|op| match op {
-                Command::Pad(p) => Some(*p),
-                _ => None,
-            })
+        post_ops.iter().rev().find_map(|op| match op {
+            Command::Pad(p) => Some(*p),
+            _ => None,
+        })
     } else {
         None
     };
@@ -1512,6 +1559,7 @@ pub fn compute_layout_sequential(
         crop: source_crop_in_source,
         target_size: layout.resize_to,
         orientation,
+        min_precise_scaling_ratio: None,
     };
 
     Ok((ideal, request))
@@ -1623,6 +1671,7 @@ fn plan_from_parts(
         crop: source_crop_in_source,
         target_size: layout.resize_to,
         orientation,
+        min_precise_scaling_ratio: None,
     };
 
     Ok((ideal, request))
@@ -1683,15 +1732,12 @@ fn resolve_region(
     let place_y = (ot - top) as u32;
 
     // Is the overlap the full source? If so, no crop needed.
-    let source_crop = if overlap_x == 0
-        && overlap_y == 0
-        && overlap_w == source_w
-        && overlap_h == source_h
-    {
-        None
-    } else {
-        Some(Rect::new(overlap_x, overlap_y, overlap_w, overlap_h))
-    };
+    let source_crop =
+        if overlap_x == 0 && overlap_y == 0 && overlap_w == source_w && overlap_h == source_h {
+            None
+        } else {
+            Some(Rect::new(overlap_x, overlap_y, overlap_w, overlap_h))
+        };
 
     // Is the viewport exactly the overlap? (pure crop, no padding)
     let is_pure_crop = place_x == 0 && place_y == 0 && vw == overlap_w && vh == overlap_h;
@@ -1971,7 +2017,13 @@ mod tests {
 
     #[test]
     fn pad_expands_canvas() {
-        let commands = [Command::Pad(Padding::new(10, 20, 10, 20, CanvasColor::white()))];
+        let commands = [Command::Pad(Padding::new(
+            10,
+            20,
+            10,
+            20,
+            CanvasColor::white(),
+        ))];
         let (ideal, _) = compute_layout(&commands, 400, 300, None).unwrap();
         assert_eq!(ideal.layout.resize_to, Size::new(400, 300));
         assert_eq!(ideal.layout.canvas, Size::new(440, 320));
@@ -1998,7 +2050,11 @@ mod tests {
 
     #[test]
     fn finalize_full_decode_no_orientation() {
-        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 400, 300))];
+        let commands = [Command::Constrain(Constraint::new(
+            ConstraintMode::Fit,
+            400,
+            300,
+        ))];
         let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
         let offer = DecoderOffer::full_decode(800, 600);
         let plan = finalize(&ideal, &req, &offer);
@@ -2109,7 +2165,11 @@ mod tests {
 
     #[test]
     fn resize_not_identity_when_scaling() {
-        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 400, 300))];
+        let commands = [Command::Constrain(Constraint::new(
+            ConstraintMode::Fit,
+            400,
+            300,
+        ))];
         let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
         let offer = DecoderOffer::full_decode(800, 600);
         let plan = finalize(&ideal, &req, &offer);
@@ -2175,7 +2235,11 @@ mod tests {
     #[test]
     fn decoder_prescale_half() {
         // Request: fit 4000×3000 to 500×500, decoder prescales to 2000×1500
-        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 500, 500))];
+        let commands = [Command::Constrain(Constraint::new(
+            ConstraintMode::Fit,
+            500,
+            500,
+        ))];
         let (ideal, req) = compute_layout(&commands, 4000, 3000, None).unwrap();
         assert_eq!(ideal.layout.resize_to, Size::new(500, 375));
 
@@ -2195,7 +2259,11 @@ mod tests {
     #[test]
     fn decoder_prescale_to_exact_target() {
         // JPEG decoder prescales to exactly the target size — no resize needed
-        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 500, 375))];
+        let commands = [Command::Constrain(Constraint::new(
+            ConstraintMode::Fit,
+            500,
+            375,
+        ))];
         let (ideal, req) = compute_layout(&commands, 4000, 3000, None).unwrap();
         let offer = DecoderOffer {
             dimensions: Size::new(500, 375),
@@ -2209,7 +2277,11 @@ mod tests {
     #[test]
     fn decoder_prescale_eighth() {
         // 1/8 prescale: 4000×3000 → 500×375, matches target exactly
-        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 500, 500))];
+        let commands = [Command::Constrain(Constraint::new(
+            ConstraintMode::Fit,
+            500,
+            500,
+        ))];
         let (_, req) = compute_layout(&commands, 4000, 3000, None).unwrap();
         // Decoder only managed 1/8 but dimensions don't match target
         let offer = DecoderOffer {
@@ -2218,7 +2290,11 @@ mod tests {
             orientation_applied: Orientation::Identity,
         };
         let (_, lp) = plan_finalize(
-            &[Command::Constrain(Constraint::new(ConstraintMode::Fit, 500, 500))],
+            &[Command::Constrain(Constraint::new(
+                ConstraintMode::Fit,
+                500,
+                500,
+            ))],
             4000,
             3000,
             &offer,
@@ -2541,7 +2617,11 @@ mod tests {
     #[test]
     fn one_pixel_image_with_fit() {
         // Fit upscales: 1×1 → 100×100
-        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 100, 100))];
+        let commands = [Command::Constrain(Constraint::new(
+            ConstraintMode::Fit,
+            100,
+            100,
+        ))];
         let (_, lp) = plan_finalize(&commands, 1, 1, &DecoderOffer::full_decode(1, 1));
         assert_eq!(lp.resize_to, Size::new(100, 100));
         assert!(!lp.resize_is_identity);
@@ -2550,7 +2630,11 @@ mod tests {
     #[test]
     fn one_pixel_image_with_within() {
         // Within never upscales: 1×1 stays 1×1
-        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Within, 100, 100))];
+        let commands = [Command::Constrain(Constraint::new(
+            ConstraintMode::Within,
+            100,
+            100,
+        ))];
         let (_, lp) = plan_finalize(&commands, 1, 1, &DecoderOffer::full_decode(1, 1));
         assert_eq!(lp.resize_to, Size::new(1, 1));
         assert!(lp.resize_is_identity);
@@ -2640,9 +2724,8 @@ mod tests {
     #[test]
     fn finalize_preserves_canvas_from_fit_pad() {
         let commands = [Command::Constrain(
-                Constraint::new(ConstraintMode::FitPad, 400, 400)
-                    .canvas_color(CanvasColor::white()),
-            )];
+            Constraint::new(ConstraintMode::FitPad, 400, 400).canvas_color(CanvasColor::white()),
+        )];
         let (ideal, req) = compute_layout(&commands, 1000, 500, None).unwrap();
         assert_eq!(ideal.layout.canvas, Size::new(400, 400));
         assert_eq!(ideal.layout.resize_to, Size::new(400, 200));
@@ -2658,7 +2741,11 @@ mod tests {
 
     #[test]
     fn finalize_preserves_canvas_from_fit_crop() {
-        let commands = [Command::Constrain(Constraint::new(ConstraintMode::FitCrop, 400, 400))];
+        let commands = [Command::Constrain(Constraint::new(
+            ConstraintMode::FitCrop,
+            400,
+            400,
+        ))];
         let (ideal, req) = compute_layout(&commands, 1000, 500, None).unwrap();
         assert_eq!(ideal.layout.canvas, Size::new(400, 400));
         assert_eq!(ideal.layout.resize_to, Size::new(400, 400));
@@ -2675,7 +2762,11 @@ mod tests {
     #[test]
     fn decoder_crops_unrequested() {
         // No crop in commands, but decoder crops anyway (weird but possible)
-        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 400, 300))];
+        let commands = [Command::Constrain(Constraint::new(
+            ConstraintMode::Fit,
+            400,
+            300,
+        ))];
         let (ideal, req) = compute_layout(&commands, 800, 600, None).unwrap();
         assert!(req.crop.is_none());
 
@@ -2843,7 +2934,11 @@ mod tests {
 
     #[test]
     fn extreme_aspect_ratio_1x10000() {
-        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 100, 100))];
+        let commands = [Command::Constrain(Constraint::new(
+            ConstraintMode::Fit,
+            100,
+            100,
+        ))];
         let (ideal, req) = compute_layout(&commands, 1, 10000, None).unwrap();
         // Fit 1×10000 into 100×100 → 1×100
         assert_eq!(ideal.layout.resize_to, Size::new(1, 100));
@@ -2856,7 +2951,11 @@ mod tests {
 
     #[test]
     fn extreme_aspect_ratio_10000x1() {
-        let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 100, 100))];
+        let commands = [Command::Constrain(Constraint::new(
+            ConstraintMode::Fit,
+            100,
+            100,
+        ))];
         let (ideal, _) = compute_layout(&commands, 10000, 1, None).unwrap();
         assert_eq!(ideal.layout.resize_to, Size::new(100, 1));
     }
@@ -2901,9 +3000,8 @@ mod tests {
     #[test]
     fn fit_pad_with_prescaled_decoder() {
         let commands = [Command::Constrain(
-                Constraint::new(ConstraintMode::FitPad, 400, 400)
-                    .canvas_color(CanvasColor::white()),
-            )];
+            Constraint::new(ConstraintMode::FitPad, 400, 400).canvas_color(CanvasColor::white()),
+        )];
         let (ideal, req) = compute_layout(&commands, 4000, 2000, None).unwrap();
         // Fit 4000×2000 into 400×400 → 400×200, canvas 400×400, placement (0,100)
         assert_eq!(ideal.layout.resize_to, Size::new(400, 200));
@@ -4767,31 +4865,22 @@ mod tests {
         let crop = SourceCrop::pixels(100, 50, 400, 300);
         let region = crop.to_region();
         // Region from crop should produce same layout as crop directly
-        let (crop_layout, _) = Pipeline::new(800, 600)
-            .crop(crop)
-            .plan()
-            .unwrap();
-        let (region_layout, _) = Pipeline::new(800, 600)
-            .region(region)
-            .plan()
-            .unwrap();
+        let (crop_layout, _) = Pipeline::new(800, 600).crop(crop).plan().unwrap();
+        let (region_layout, _) = Pipeline::new(800, 600).region(region).plan().unwrap();
         assert_eq!(crop_layout.layout.canvas, region_layout.layout.canvas);
         assert_eq!(crop_layout.layout.resize_to, region_layout.layout.resize_to);
-        assert_eq!(crop_layout.layout.source_crop, region_layout.layout.source_crop);
+        assert_eq!(
+            crop_layout.layout.source_crop,
+            region_layout.layout.source_crop
+        );
     }
 
     #[test]
     fn source_crop_to_region_percent() {
         let crop = SourceCrop::percent(0.1, 0.1, 0.8, 0.8);
         let region = crop.to_region();
-        let (crop_layout, _) = Pipeline::new(1000, 500)
-            .crop(crop)
-            .plan()
-            .unwrap();
-        let (region_layout, _) = Pipeline::new(1000, 500)
-            .region(region)
-            .plan()
-            .unwrap();
+        let (crop_layout, _) = Pipeline::new(1000, 500).crop(crop).plan().unwrap();
+        let (region_layout, _) = Pipeline::new(1000, 500).region(region).plan().unwrap();
         assert_eq!(crop_layout.layout.canvas, region_layout.layout.canvas);
         assert_eq!(crop_layout.layout.resize_to, region_layout.layout.resize_to);
     }
@@ -4955,15 +5044,16 @@ mod tests {
 
     #[test]
     fn sequential_with_limits() {
-        let commands = [
-            Command::Constrain(Constraint::new(ConstraintMode::Fit, 2000, 2000)),
-        ];
+        let commands = [Command::Constrain(Constraint::new(
+            ConstraintMode::Fit,
+            2000,
+            2000,
+        ))];
         let limits = OutputLimits {
             max: Some(Size::new(500, 500)),
             ..Default::default()
         };
-        let (ideal, _) =
-            compute_layout_sequential(&commands, 800, 600, Some(&limits)).unwrap();
+        let (ideal, _) = compute_layout_sequential(&commands, 800, 600, Some(&limits)).unwrap();
         assert!(ideal.layout.canvas.width <= 500);
         assert!(ideal.layout.canvas.height <= 500);
     }

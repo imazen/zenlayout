@@ -95,6 +95,18 @@ pub struct Instructions {
     pub zoom: Option<f64>,
     /// Background color for padding.
     pub bgcolor: Option<CanvasColor>,
+    /// Minimum scaling ratio for decoder-integrated downscaling to be trusted.
+    ///
+    /// Passed through to [`DecoderRequest::min_precise_scaling_ratio`](crate::DecoderRequest::min_precise_scaling_ratio).
+    /// When the ratio between source and target is below this value, the decoder
+    /// should decode at a larger size and let the resize engine do the scaling.
+    ///
+    /// Maps to RIAPI `decoder.min_precise_scaling_ratio`.
+    pub min_precise_scaling_ratio: Option<f64>,
+    /// Whether JPEG IDCT downscaling should use linear light.
+    ///
+    /// Maps to RIAPI `jpeg_idct_downscale_linear`.
+    pub jpeg_idct_downscale_linear: Option<bool>,
     /// Non-layout parameters preserved for downstream consumers.
     pub extras: BTreeMap<String, String>,
 }
@@ -127,6 +139,8 @@ impl Instructions {
             cropyunits: None,
             zoom: None,
             bgcolor: None,
+            min_precise_scaling_ratio: None,
+            jpeg_idct_downscale_linear: None,
             extras: BTreeMap::new(),
         }
     }
