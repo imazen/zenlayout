@@ -57,13 +57,19 @@ mod mode_max {
     #[test]
     fn downscale_only_larger_source() {
         // Within: downscale only. 1000x500 into 800x600 → 800x400
-        assert_eq!(resize("w=800&h=600&mode=max", 1000, 500), Size::new(800, 400));
+        assert_eq!(
+            resize("w=800&h=600&mode=max", 1000, 500),
+            Size::new(800, 400)
+        );
     }
 
     #[test]
     fn downscale_only_smaller_source() {
         // Source 200x100 fits in 800x600 → identity
-        assert_eq!(resize("w=800&h=600&mode=max", 200, 100), Size::new(200, 100));
+        assert_eq!(
+            resize("w=800&h=600&mode=max", 200, 100),
+            Size::new(200, 100)
+        );
     }
 
     #[test]
@@ -252,24 +258,36 @@ mod dimensions {
     #[test]
     fn maxwidth_caps_w() {
         // w=800, maxwidth=500 → effective w=500
-        assert_eq!(resize("w=800&maxwidth=500&mode=max", 1000, 500), Size::new(500, 250));
+        assert_eq!(
+            resize("w=800&maxwidth=500&mode=max", 1000, 500),
+            Size::new(500, 250)
+        );
     }
 
     #[test]
     fn maxheight_caps_h() {
         // h=800, maxheight=300 → effective h=300
-        assert_eq!(resize("h=800&maxheight=300&mode=max", 1000, 500), Size::new(600, 300));
+        assert_eq!(
+            resize("h=800&maxheight=300&mode=max", 1000, 500),
+            Size::new(600, 300)
+        );
     }
 
     #[test]
     fn maxwidth_alone() {
         // maxwidth=500, no w → effective w=500
-        assert_eq!(resize("maxwidth=500&mode=max", 1000, 500), Size::new(500, 250));
+        assert_eq!(
+            resize("maxwidth=500&mode=max", 1000, 500),
+            Size::new(500, 250)
+        );
     }
 
     #[test]
     fn maxheight_alone() {
-        assert_eq!(resize("maxheight=250&mode=max", 1000, 500), Size::new(500, 250));
+        assert_eq!(
+            resize("maxheight=250&mode=max", 1000, 500),
+            Size::new(500, 250)
+        );
     }
 
     #[test]
@@ -325,8 +343,12 @@ mod crop_params {
     #[test]
     fn c_shorthand_percent() {
         // c=10,10,90,90 → crop 10-90% on both axes
-        let (r, _, crop) =
-            query_layout("w=400&h=300&mode=max&scale=both&c=10,10,90,90", 1000, 500, None);
+        let (r, _, crop) = query_layout(
+            "w=400&h=300&mode=max&scale=both&c=10,10,90,90",
+            1000,
+            500,
+            None,
+        );
         // Crop: 10-90% of 1000x500 → 800x400 sub-region
         // 800x400 (2:1) fit 400x300 → 400x200
         assert_eq!(r, Size::new(400, 200));
@@ -364,8 +386,7 @@ mod crop_params {
     #[test]
     fn crop_negative_offset() {
         // crop=0,0,-100,0 → x2 = source_w - 100 = 900
-        let (_, _, crop) =
-            query_layout("mode=max&crop=0,0,-100,0", 1000, 500, None);
+        let (_, _, crop) = query_layout("mode=max&crop=0,0,-100,0", 1000, 500, None);
         let c = crop.expect("should crop");
         assert_eq!(c.y, 0);
         // x2 = -100 + 1000 = 900, width = 900
@@ -384,7 +405,10 @@ mod orientation {
     fn srotate_90() {
         // srotate=90 rotates source: 1000x500 → effective 500x1000
         // Then fit into 800x600 → 300x600
-        assert_eq!(resize("w=800&h=600&mode=max&srotate=90", 1000, 500), Size::new(300, 600));
+        assert_eq!(
+            resize("w=800&h=600&mode=max&srotate=90", 1000, 500),
+            Size::new(300, 600)
+        );
     }
 
     #[test]
@@ -604,7 +628,10 @@ mod parsing {
         let result = riapi::parse("anchor=50,25");
         assert_eq!(
             result.instructions.anchor,
-            Some((riapi::Anchor1D::Percent(50.0), riapi::Anchor1D::Percent(25.0)))
+            Some((
+                riapi::Anchor1D::Percent(50.0),
+                riapi::Anchor1D::Percent(25.0)
+            ))
         );
     }
 
@@ -667,16 +694,37 @@ mod parsing {
         let result = riapi::parse(
             "w=800&format=webp&quality=80&f.sharpen=10&decoder.min_precise_scaling_ratio=3.5",
         );
-        assert_eq!(result.instructions.extras().get("format").map(String::as_str), Some("webp"));
-        assert_eq!(result.instructions.extras().get("quality").map(String::as_str), Some("80"));
+        assert_eq!(
+            result
+                .instructions
+                .extras()
+                .get("format")
+                .map(String::as_str),
+            Some("webp")
+        );
+        assert_eq!(
+            result
+                .instructions
+                .extras()
+                .get("quality")
+                .map(String::as_str),
+            Some("80")
+        );
         // decoder.min_precise_scaling_ratio is a first-class field, not in extras
         assert_eq!(result.instructions.min_precise_scaling_ratio, Some(3.5));
         assert_eq!(
-            result.instructions.extras().get("decoder.min_precise_scaling_ratio"),
+            result
+                .instructions
+                .extras()
+                .get("decoder.min_precise_scaling_ratio"),
             None
         );
         assert_eq!(
-            result.instructions.extras().get("f.sharpen").map(String::as_str),
+            result
+                .instructions
+                .extras()
+                .get("f.sharpen")
+                .map(String::as_str),
             Some("10")
         );
     }
@@ -729,8 +777,7 @@ mod imageflow_reference {
 
     #[test]
     fn crop_mode_with_both_1000x500_to_800x600() {
-        let (r, _, _) =
-            query_layout("w=800&h=600&mode=crop&scale=both", 1000, 500, None);
+        let (r, _, _) = query_layout("w=800&h=600&mode=crop&scale=both", 1000, 500, None);
         assert_eq!(r, Size::new(800, 600));
     }
 }
@@ -792,9 +839,11 @@ mod edge_cases {
     fn only_unknown_keys() {
         let result = riapi::parse("foo=bar&baz=qux");
         assert_eq!(result.warnings.len(), 2);
-        assert!(result
-            .warnings
-            .iter()
-            .all(|w| matches!(w, riapi::ParseWarning::KeyNotRecognized { .. })));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .all(|w| matches!(w, riapi::ParseWarning::KeyNotRecognized { .. }))
+        );
     }
 }
