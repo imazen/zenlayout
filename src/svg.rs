@@ -215,7 +215,12 @@ fn build_steps(ideal: &IdealLayout, plan: &LayoutPlan) -> Vec<Step> {
                 h: plan.resize_to.height,
             }),
             content_dims: plan.resize_to,
-            annotation: format!("place at ({}, {}), bg {}", px, py, format_color(&plan.canvas_color)),
+            annotation: format!(
+                "place at ({}, {}), bg {}",
+                px,
+                py,
+                format_color(&plan.canvas_color)
+            ),
             show_extension: None,
         });
     }
@@ -233,7 +238,10 @@ fn build_steps(ideal: &IdealLayout, plan: &LayoutPlan) -> Vec<Step> {
                 h: content.height,
             }),
             content_dims: content,
-            annotation: format!("edges replicated to {}×{}", plan.canvas.width, plan.canvas.height),
+            annotation: format!(
+                "edges replicated to {}×{}",
+                plan.canvas.width, plan.canvas.height
+            ),
             show_extension: Some(content),
         });
     }
@@ -241,9 +249,8 @@ fn build_steps(ideal: &IdealLayout, plan: &LayoutPlan) -> Vec<Step> {
     // Final output step (always shown)
     let final_size = plan.canvas;
     let last = steps.last().map(|s| &s.label);
-    let already_final = last.is_some_and(|l| {
-        l.starts_with("Canvas") || l.starts_with("Extend") || l == "Resize"
-    });
+    let already_final =
+        last.is_some_and(|l| l.starts_with("Canvas") || l.starts_with("Extend") || l == "Resize");
     if !already_final || steps.len() == 1 {
         steps.push(Step {
             label: String::from("Output"),
@@ -323,15 +330,13 @@ fn render_steps(steps: &[Step]) -> String {
     // SVG header
     svg.push_str(&format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">"#,
-        total_w as u32,
-        total_h as u32,
-        total_w,
-        total_h
+        total_w as u32, total_h as u32, total_w, total_h
     ));
     svg.push('\n');
 
     // Style — light/dark mode via prefers-color-scheme
-    svg.push_str(r##"<style>
+    svg.push_str(
+        r##"<style>
   text { font-family: "Consolas", "DejaVu Sans Mono", "Courier New", monospace; }
   .label { font-size: 13px; font-weight: bold; fill: #333; }
   .dim { font-size: 11px; font-weight: bold; fill: #1a4a70; }
@@ -356,15 +361,18 @@ fn render_steps(steps: &[Step]) -> String {
     .arrowhead { fill: #888; }
   }
 </style>
-"##);
+"##,
+    );
 
     // Arrow marker definition
-    svg.push_str(r##"<defs>
+    svg.push_str(
+        r##"<defs>
   <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
     <polygon points="0 0, 8 3, 0 6" class="arrowhead"/>
   </marker>
 </defs>
-"##);
+"##,
+    );
 
     let mut y = MARGIN_TOP;
     let center_x = total_w / 2.0;
@@ -394,7 +402,10 @@ fn render_steps(steps: &[Step]) -> String {
 
         // For ContentFill with no inner, the outer IS the content box.
         // For ImageDiscard/Padding, draw the outer as background first.
-        if step.outer_role == OuterRole::ContentFill && step.inner.is_none() && step.show_extension.is_none() {
+        if step.outer_role == OuterRole::ContentFill
+            && step.inner.is_none()
+            && step.show_extension.is_none()
+        {
             // Single content rect fills the whole panel
             svg.push_str(&format!(
                 r#"<rect x="{:.1}" y="{:.1}" width="{:.1}" height="{:.1}" class="content" rx="2"/>"#,
@@ -521,7 +532,12 @@ fn format_color(color: &crate::constraint::CanvasColor) -> String {
     use crate::constraint::CanvasColor;
     match color {
         CanvasColor::Transparent => String::from("transparent"),
-        CanvasColor::Srgb { r: 0, g: 0, b: 0, a: 255 } => String::from("black"),
+        CanvasColor::Srgb {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        } => String::from("black"),
         CanvasColor::Srgb {
             r: 255,
             g: 255,
@@ -588,10 +604,7 @@ mod tests {
 
     #[test]
     fn svg_fit_pad_shows_canvas() {
-        let (ideal, req) = Pipeline::new(200, 100)
-            .fit_pad(100, 100)
-            .plan()
-            .unwrap();
+        let (ideal, req) = Pipeline::new(200, 100).fit_pad(100, 100).plan().unwrap();
 
         let offer = DecoderOffer::full_decode(200, 100);
         let plan = ideal.finalize(&req, &offer);
@@ -674,21 +687,24 @@ mod tests {
         let plan = ideal.finalize(&req, &offer);
 
         let svg = render_layout_svg(&ideal, &plan);
-        assert!(svg.contains("class=\"discard\""), "Crop outer should use discard class");
+        assert!(
+            svg.contains("class=\"discard\""),
+            "Crop outer should use discard class"
+        );
     }
 
     #[test]
     fn svg_padding_class_for_canvas() {
-        let (ideal, req) = Pipeline::new(200, 100)
-            .fit_pad(100, 100)
-            .plan()
-            .unwrap();
+        let (ideal, req) = Pipeline::new(200, 100).fit_pad(100, 100).plan().unwrap();
 
         let offer = DecoderOffer::full_decode(200, 100);
         let plan = ideal.finalize(&req, &offer);
 
         let svg = render_layout_svg(&ideal, &plan);
-        assert!(svg.contains("class=\"padding\""), "Canvas outer should use padding class");
+        assert!(
+            svg.contains("class=\"padding\""),
+            "Canvas outer should use padding class"
+        );
     }
 
     #[test]
@@ -725,7 +741,8 @@ mod tests {
                 let (ideal, req) = Pipeline::new(1000, 800)
                     .crop_pixels(100, 50, 600, 500)
                     .fit(300, 250)
-                    .plan().unwrap();
+                    .plan()
+                    .unwrap();
                 let plan = ideal.finalize(&req, &DecoderOffer::full_decode(1000, 800));
                 ("crop_resize", render_layout_svg(&ideal, &plan))
             },
@@ -734,7 +751,8 @@ mod tests {
                 let (ideal, req) = Pipeline::new(4000, 3000)
                     .auto_orient(6)
                     .fit(600, 800)
-                    .plan().unwrap();
+                    .plan()
+                    .unwrap();
                 let plan = ideal.finalize(&req, &DecoderOffer::full_decode(4000, 3000));
                 ("orient_resize", render_layout_svg(&ideal, &plan))
             },
@@ -744,7 +762,8 @@ mod tests {
                     .auto_orient(6)
                     .crop_pixels(200, 200, 2600, 2600)
                     .fit_pad(800, 800)
-                    .plan().unwrap();
+                    .plan()
+                    .unwrap();
                 let plan = ideal.finalize(&req, &DecoderOffer::full_decode(4000, 3000));
                 ("orient_crop_pad", render_layout_svg(&ideal, &plan))
             },
@@ -752,10 +771,12 @@ mod tests {
             {
                 let (ideal, req) = Pipeline::new(801, 601)
                     .output_limits(OutputLimits {
-                        max: None, min: None,
+                        max: None,
+                        min: None,
                         align: Some(Align::uniform_extend(16)),
                     })
-                    .plan().unwrap();
+                    .plan()
+                    .unwrap();
                 let plan = ideal.finalize(&req, &DecoderOffer::full_decode(801, 601));
                 ("mcu_extend", render_layout_svg(&ideal, &plan))
             },
@@ -763,7 +784,8 @@ mod tests {
             {
                 let (ideal, req) = Pipeline::new(800, 600)
                     .within_crop(400, 400)
-                    .plan().unwrap();
+                    .plan()
+                    .unwrap();
                 let plan = ideal.finalize(&req, &DecoderOffer::full_decode(800, 600));
                 ("within_crop", render_layout_svg(&ideal, &plan))
             },
@@ -771,7 +793,8 @@ mod tests {
             {
                 let (ideal, req) = Pipeline::new(800, 600)
                     .region_viewport(-50, 0, 600, 600, CanvasColor::black())
-                    .plan().unwrap();
+                    .plan()
+                    .unwrap();
                 let plan = ideal.finalize(&req, &DecoderOffer::full_decode(800, 600));
                 ("region_viewport", render_layout_svg(&ideal, &plan))
             },
@@ -780,7 +803,8 @@ mod tests {
                 let (ideal, req) = Pipeline::new(800, 600)
                     .region_pad(50, CanvasColor::white())
                     .fit(450, 350)
-                    .plan().unwrap();
+                    .plan()
+                    .unwrap();
                 let plan = ideal.finalize(&req, &DecoderOffer::full_decode(800, 600));
                 ("region_pad", render_layout_svg(&ideal, &plan))
             },
@@ -796,7 +820,8 @@ mod tests {
                 let (ideal, req) = Pipeline::new(1000, 500)
                     .region(reg)
                     .fit(400, 200)
-                    .plan().unwrap();
+                    .plan()
+                    .unwrap();
                 let plan = ideal.finalize(&req, &DecoderOffer::full_decode(1000, 500));
                 ("region_pct_crop", render_layout_svg(&ideal, &plan))
             },
@@ -805,7 +830,8 @@ mod tests {
                 let (ideal, req) = Pipeline::new(1920, 1080)
                     .rotate_90()
                     .fit(540, 960)
-                    .plan().unwrap();
+                    .plan()
+                    .unwrap();
                 let plan = ideal.finalize(&req, &DecoderOffer::full_decode(1920, 1080));
                 ("rotate_90", render_layout_svg(&ideal, &plan))
             },
@@ -814,7 +840,8 @@ mod tests {
                 let (ideal, req) = Pipeline::new(800, 600)
                     .rotate_180()
                     .fit(400, 300)
-                    .plan().unwrap();
+                    .plan()
+                    .unwrap();
                 let plan = ideal.finalize(&req, &DecoderOffer::full_decode(800, 600));
                 ("rotate_180", render_layout_svg(&ideal, &plan))
             },
@@ -823,7 +850,8 @@ mod tests {
                 let (ideal, req) = Pipeline::new(800, 600)
                     .flip_h()
                     .fit(400, 300)
-                    .plan().unwrap();
+                    .plan()
+                    .unwrap();
                 let plan = ideal.finalize(&req, &DecoderOffer::full_decode(800, 600));
                 ("flip_h", render_layout_svg(&ideal, &plan))
             },

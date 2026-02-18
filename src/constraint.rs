@@ -1702,7 +1702,12 @@ mod tests {
                             if layout.source_crop.is_some() {
                                 failures.push(format!("{tag}: unexpected source_crop"));
                             }
-                            if px > 0 && py > 0 && px + rw as i32 > 0 && (px as u32) + rw < tw && (py as u32) + rh < th {
+                            if px > 0
+                                && py > 0
+                                && px + rw as i32 > 0
+                                && (px as u32) + rw < tw
+                                && (py as u32) + rh < th
+                            {
                                 failures.push(format!("{tag}: padding on all 4 sides"));
                             }
                             if px as u32 + rw > tw || py as u32 + rh > th {

@@ -84,12 +84,10 @@ impl Grid {
         }
         let mut pixels = Vec::with_capacity((new_w * new_h) as usize);
         for y in 0..new_h {
-            let src_y =
-                ((y as f64 + 0.5) * self.height as f64 / new_h as f64).floor() as u32;
+            let src_y = ((y as f64 + 0.5) * self.height as f64 / new_h as f64).floor() as u32;
             let src_y = src_y.min(self.height - 1);
             for x in 0..new_w {
-                let src_x =
-                    ((x as f64 + 0.5) * self.width as f64 / new_w as f64).floor() as u32;
+                let src_x = ((x as f64 + 0.5) * self.width as f64 / new_w as f64).floor() as u32;
                 let src_x = src_x.min(self.width - 1);
                 pixels.push(self.get(src_x, src_y));
             }
@@ -330,7 +328,10 @@ fn immediate_eval(source: &Grid, commands: &[Command]) -> Grid {
                 current = current.apply_region(reg);
             }
             Command::Constrain(constraint) => {
-                let layout = constraint.clone().compute(current.width, current.height).unwrap();
+                let layout = constraint
+                    .clone()
+                    .compute(current.width, current.height)
+                    .unwrap();
                 // In immediate mode, the constraint's source is the current buffer.
                 // source_crop applies to current, then resize, then place on canvas.
                 let cropped = if let Some(sc) = &layout.source_crop {
@@ -338,8 +339,7 @@ fn immediate_eval(source: &Grid, commands: &[Command]) -> Grid {
                 } else {
                     current
                 };
-                let resized =
-                    cropped.resize_nn(layout.resize_to.width, layout.resize_to.height);
+                let resized = cropped.resize_nn(layout.resize_to.width, layout.resize_to.height);
                 current = resized.place_on_canvas(
                     layout.canvas.width,
                     layout.canvas.height,
@@ -359,12 +359,7 @@ fn immediate_eval(source: &Grid, commands: &[Command]) -> Grid {
 /// Fused-mode: compute a single Layout via compute_layout_sequential,
 /// apply it in one pass to the original source.
 fn fused_eval(source: &Grid, commands: &[Command]) -> Result<Grid, LayoutError> {
-    let (ideal, _request) = compute_layout_sequential(
-        commands,
-        source.width,
-        source.height,
-        None,
-    )?;
+    let (ideal, _request) = compute_layout_sequential(commands, source.width, source.height, None)?;
 
     // Apply orientation to source first (layout expects oriented source)
     let oriented = source.apply_orientation(ideal.orientation);
@@ -397,16 +392,16 @@ fn compare(name: &str, source: &Grid, commands: &[Command]) {
                             mismatches += 1;
                         }
                     }
-                    eprintln!(
-                        "{mismatches}/{} pixels differ",
-                        immediate.pixels.len()
-                    );
+                    eprintln!("{mismatches}/{} pixels differ", immediate.pixels.len());
                 }
                 panic!("{name}: immediate != fused");
             }
         }
         Err(e) => {
-            panic!("{name}: fused eval failed with {e}, but immediate produced {}x{}", immediate.width, immediate.height);
+            panic!(
+                "{name}: fused eval failed with {e}, but immediate produced {}x{}",
+                immediate.width, immediate.height
+            );
         }
     }
 }
@@ -443,7 +438,10 @@ fn compare_expect_mismatch(name: &str, source: &Grid, commands: &[Command]) -> O
     let fused = match fused_eval(source, commands) {
         Ok(f) => f,
         Err(e) => {
-            return Some(format!("{name}: fused error '{e}', immediate produced {}x{}", immediate.width, immediate.height));
+            return Some(format!(
+                "{name}: fused error '{e}', immediate produced {}x{}",
+                immediate.width, immediate.height
+            ));
         }
     };
 
@@ -454,12 +452,21 @@ fn compare_expect_mismatch(name: &str, source: &Grid, commands: &[Command]) -> O
     if match_ok {
         None
     } else {
-        let mut msg = format!("{name}: size immediate={}x{} fused={}x{}",
-            immediate.width, immediate.height, fused.width, fused.height);
+        let mut msg = format!(
+            "{name}: size immediate={}x{} fused={}x{}",
+            immediate.width, immediate.height, fused.width, fused.height
+        );
         if immediate.width == fused.width && immediate.height == fused.height {
-            let mismatches = immediate.pixels.iter().zip(&fused.pixels)
-                .filter(|(a, b)| a != b).count();
-            msg.push_str(&format!(", {mismatches}/{} pixels differ", immediate.pixels.len()));
+            let mismatches = immediate
+                .pixels
+                .iter()
+                .zip(&fused.pixels)
+                .filter(|(a, b)| a != b)
+                .count();
+            msg.push_str(&format!(
+                ", {mismatches}/{} pixels differ",
+                immediate.pixels.len()
+            ));
         }
         Some(msg)
     }
@@ -518,7 +525,11 @@ fn orient_crop_constrain() {
 #[test]
 fn constrain_only() {
     let src = Grid::source(100, 50);
-    let commands = [Command::Constrain(Constraint::new(ConstraintMode::Fit, 50, 50))];
+    let commands = [Command::Constrain(Constraint::new(
+        ConstraintMode::Fit,
+        50,
+        50,
+    ))];
     compare("constrain_only", &src, &commands);
 }
 
@@ -576,7 +587,10 @@ fn constrain_then_crop_center() {
         eprintln!("EXPECTED MISMATCH (u32 placement can't go negative): {msg}");
     }
     // Fixed: i32 placement allows negative offsets.
-    assert!(mismatch.is_none(), "constrain→crop(center) should match now that placement is i32");
+    assert!(
+        mismatch.is_none(),
+        "constrain→crop(center) should match now that placement is i32"
+    );
 }
 
 #[test]
@@ -705,7 +719,12 @@ fn crop(x: u32, y: u32, w: u32, h: u32) -> Command {
 }
 
 fn pct_crop(x: f32, y: f32, w: f32, h: f32) -> Command {
-    Command::Crop(SourceCrop::Percent { x, y, width: w, height: h })
+    Command::Crop(SourceCrop::Percent {
+        x,
+        y,
+        width: w,
+        height: h,
+    })
 }
 
 fn rot90() -> Command {
@@ -729,7 +748,13 @@ fn flip_v() -> Command {
 }
 
 fn pad(top: u32, right: u32, bottom: u32, left: u32) -> Command {
-    Command::Pad(Padding::new(top, right, bottom, left, CanvasColor::Transparent))
+    Command::Pad(Padding::new(
+        top,
+        right,
+        bottom,
+        left,
+        CanvasColor::Transparent,
+    ))
 }
 
 fn exif(val: u8) -> Command {
@@ -759,7 +784,11 @@ fn triple_rotation_compose() {
 fn four_rotations_identity() {
     // 90 * 4 = 360 = identity
     let src = Grid::source(15, 10);
-    compare("rot90×4=identity", &src, &[rot90(), rot90(), rot90(), rot90()]);
+    compare(
+        "rot90×4=identity",
+        &src,
+        &[rot90(), rot90(), rot90(), rot90()],
+    );
 }
 
 #[test]
@@ -813,7 +842,11 @@ fn exif_compose_with_manual_rotation() {
 fn exif_8_then_flip_then_crop() {
     // EXIF 8 = Rotate270, then flip horizontal, then crop
     let src = Grid::source(12, 8);
-    compare("exif(8)→flipH→crop", &src, &[exif(8), flip_h(), crop(1, 1, 4, 6)]);
+    compare(
+        "exif(8)→flipH→crop",
+        &src,
+        &[exif(8), flip_h(), crop(1, 1, 4, 6)],
+    );
 }
 
 #[test]
@@ -1005,7 +1038,11 @@ fn flip_crop_flip_vs_mirror_crop() {
     // Immediate: flip→crop left→flip = right side of source
     // Fused: FlipH∘FlipH=Identity, crop left = left side of source
     let src = Grid::source(12, 8);
-    compare_divergent("flipH→crop(0,0,6,8)→flipH", &src, &[flip_h(), crop(0, 0, 6, 8), flip_h()]);
+    compare_divergent(
+        "flipH→crop(0,0,6,8)→flipH",
+        &src,
+        &[flip_h(), crop(0, 0, 6, 8), flip_h()],
+    );
 }
 
 #[test]
@@ -1013,7 +1050,11 @@ fn flip_v_crop_flip_v() {
     // Immediate: flip→crop top→flip = bottom of source
     // Fused: FlipV∘FlipV=Identity, crop top = top of source
     let src = Grid::source(8, 12);
-    compare_divergent("flipV→crop(0,0,8,6)→flipV", &src, &[flip_v(), crop(0, 0, 8, 6), flip_v()]);
+    compare_divergent(
+        "flipV→crop(0,0,8,6)→flipV",
+        &src,
+        &[flip_v(), crop(0, 0, 8, 6), flip_v()],
+    );
 }
 
 // --- Extreme aspect ratios ---
@@ -1449,11 +1490,7 @@ fn crop_then_all_constraint_modes() {
         ("fitpad", fit_pad(6, 6)),
         ("distort", distort(6, 6)),
     ] {
-        compare(
-            &format!("crop→{name} on 20x20"),
-            &src,
-            &[c.clone(), mode],
-        );
+        compare(&format!("crop→{name} on 20x20"), &src, &[c.clone(), mode]);
     }
 }
 
@@ -1463,7 +1500,11 @@ fn crop_then_all_constraint_modes() {
 fn thumbnail_pipeline() {
     // Typical thumbnail: auto-orient, fit to 150x150
     let src = Grid::source(40, 30);
-    compare("thumbnail: exif(6)→fit(15,15)", &src, &[exif(6), fit(15, 15)]);
+    compare(
+        "thumbnail: exif(6)→fit(15,15)",
+        &src,
+        &[exif(6), fit(15, 15)],
+    );
 }
 
 #[test]
@@ -1488,11 +1529,7 @@ fn banner_pipeline() {
 fn letterbox_pipeline() {
     // Letterbox: fit into box, pad to exact size
     let src = Grid::source(20, 10);
-    compare(
-        "letterbox: fitpad(10,10)",
-        &src,
-        &[fit_pad(10, 10)],
-    );
+    compare("letterbox: fitpad(10,10)", &src, &[fit_pad(10, 10)]);
 }
 
 #[test]
@@ -1502,12 +1539,7 @@ fn photo_edit_pipeline() {
     compare(
         "photo edit: exif(8)→crop→fit→pad border",
         &src,
-        &[
-            exif(8),
-            crop(2, 2, 12, 20),
-            fit(6, 10),
-            pad(1, 1, 1, 1),
-        ],
+        &[exif(8), crop(2, 2, 12, 20), fit(6, 10), pad(1, 1, 1, 1)],
     );
 }
 
@@ -1558,7 +1590,11 @@ fn fit_crop_1x1() {
 fn pad_then_pad() {
     // Two pads should stack
     let src = Grid::source(6, 6);
-    compare("pad(1,1,1,1)→pad(2,2,2,2)", &src, &[pad(1, 1, 1, 1), pad(2, 2, 2, 2)]);
+    compare(
+        "pad(1,1,1,1)→pad(2,2,2,2)",
+        &src,
+        &[pad(1, 1, 1, 1), pad(2, 2, 2, 2)],
+    );
 }
 
 #[test]
@@ -1598,40 +1634,154 @@ fn audit_all_two_op_sequences() {
 
     // ── Two-op sequences on 12×12 square source ──
     let cases_sq: Vec<(&str, &str, Vec<Command>, &Grid)> = vec![
-        ("MATCH", "crop→crop", vec![crop_a.clone(), crop_b.clone()], &src12),
-        ("MATCH", "crop→constrain", vec![crop_a.clone(), constrain.clone()], &src12),
-        ("MATCH", "crop→pad", vec![crop_a.clone(), pad_2.clone()], &src12),
-        ("MATCH", "crop→rotate", vec![crop_a.clone(), rotate.clone()], &src12),
-        ("MATCH", "constrain→crop(origin)", vec![
-            constrain.clone(),
-            crop(0, 0, 3, 3),
-        ], &src12),
-        ("MATCH", "constrain→crop(center)", vec![constrain.clone(), crop_b.clone()], &src12),
-        ("MATCH", "constrain→pad", vec![constrain.clone(), pad_2.clone()], &src12),
-        ("NN", "constrain→rotate", vec![constrain.clone(), rotate.clone()], &src12),
-        ("MATCH", "pad→crop", vec![pad_2.clone(), crop_a.clone()], &src12),
-        ("NN", "pad→constrain", vec![pad_2.clone(), constrain.clone()], &src12),
-        ("MATCH", "rotate→crop", vec![rotate.clone(), crop_a.clone()], &src12),
-        ("MATCH", "rotate→constrain", vec![rotate.clone(), constrain.clone()], &src12),
-        ("MATCH", "rotate→pad", vec![rotate.clone(), pad_2.clone()], &src12),
-        ("NN", "region_pad→constrain", vec![region_pad.clone(), constrain.clone()], &src12),
-        ("MATCH", "region_crop→constrain", vec![region_crop.clone(), constrain.clone()], &src12),
-        ("MATCH", "constrain→region_crop", vec![
-            constrain.clone(),
-            Command::Region(Region::crop(1, 1, 5, 5)),
-        ], &src12),
+        (
+            "MATCH",
+            "crop→crop",
+            vec![crop_a.clone(), crop_b.clone()],
+            &src12,
+        ),
+        (
+            "MATCH",
+            "crop→constrain",
+            vec![crop_a.clone(), constrain.clone()],
+            &src12,
+        ),
+        (
+            "MATCH",
+            "crop→pad",
+            vec![crop_a.clone(), pad_2.clone()],
+            &src12,
+        ),
+        (
+            "MATCH",
+            "crop→rotate",
+            vec![crop_a.clone(), rotate.clone()],
+            &src12,
+        ),
+        (
+            "MATCH",
+            "constrain→crop(origin)",
+            vec![constrain.clone(), crop(0, 0, 3, 3)],
+            &src12,
+        ),
+        (
+            "MATCH",
+            "constrain→crop(center)",
+            vec![constrain.clone(), crop_b.clone()],
+            &src12,
+        ),
+        (
+            "MATCH",
+            "constrain→pad",
+            vec![constrain.clone(), pad_2.clone()],
+            &src12,
+        ),
+        (
+            "NN",
+            "constrain→rotate",
+            vec![constrain.clone(), rotate.clone()],
+            &src12,
+        ),
+        (
+            "MATCH",
+            "pad→crop",
+            vec![pad_2.clone(), crop_a.clone()],
+            &src12,
+        ),
+        (
+            "NN",
+            "pad→constrain",
+            vec![pad_2.clone(), constrain.clone()],
+            &src12,
+        ),
+        (
+            "MATCH",
+            "rotate→crop",
+            vec![rotate.clone(), crop_a.clone()],
+            &src12,
+        ),
+        (
+            "MATCH",
+            "rotate→constrain",
+            vec![rotate.clone(), constrain.clone()],
+            &src12,
+        ),
+        (
+            "MATCH",
+            "rotate→pad",
+            vec![rotate.clone(), pad_2.clone()],
+            &src12,
+        ),
+        (
+            "NN",
+            "region_pad→constrain",
+            vec![region_pad.clone(), constrain.clone()],
+            &src12,
+        ),
+        (
+            "MATCH",
+            "region_crop→constrain",
+            vec![region_crop.clone(), constrain.clone()],
+            &src12,
+        ),
+        (
+            "MATCH",
+            "constrain→region_crop",
+            vec![constrain.clone(), Command::Region(Region::crop(1, 1, 5, 5))],
+            &src12,
+        ),
     ];
 
     // ── Post-constrain orientation on 12×8 non-square ──
     let cases_orient: Vec<(&str, &str, Vec<Command>, &Grid)> = vec![
-        ("NN", "fit→flipH", vec![constrain_rect.clone(), flip_h()], &src12x8),
-        ("NN", "fit→flipV", vec![constrain_rect.clone(), flip_v()], &src12x8),
-        ("NN", "fit→rot180", vec![constrain_rect.clone(), rot180()], &src12x8),
-        ("NN", "fit→rot90 (non-sq)", vec![constrain_rect.clone(), rot90()], &src12x8),
-        ("NN", "fit→rot270 (non-sq)", vec![constrain_rect.clone(), rot270()], &src12x8),
-        ("NN", "fit→transpose (non-sq)", vec![constrain_rect.clone(), exif(5)], &src12x8),
-        ("NN", "fit→transverse (non-sq)", vec![constrain_rect.clone(), exif(7)], &src12x8),
-        ("MATCH", "fit→flipH→flipH (identity)", vec![constrain_rect.clone(), flip_h(), flip_h()], &src12x8),
+        (
+            "NN",
+            "fit→flipH",
+            vec![constrain_rect.clone(), flip_h()],
+            &src12x8,
+        ),
+        (
+            "NN",
+            "fit→flipV",
+            vec![constrain_rect.clone(), flip_v()],
+            &src12x8,
+        ),
+        (
+            "NN",
+            "fit→rot180",
+            vec![constrain_rect.clone(), rot180()],
+            &src12x8,
+        ),
+        (
+            "NN",
+            "fit→rot90 (non-sq)",
+            vec![constrain_rect.clone(), rot90()],
+            &src12x8,
+        ),
+        (
+            "NN",
+            "fit→rot270 (non-sq)",
+            vec![constrain_rect.clone(), rot270()],
+            &src12x8,
+        ),
+        (
+            "NN",
+            "fit→transpose (non-sq)",
+            vec![constrain_rect.clone(), exif(5)],
+            &src12x8,
+        ),
+        (
+            "NN",
+            "fit→transverse (non-sq)",
+            vec![constrain_rect.clone(), exif(7)],
+            &src12x8,
+        ),
+        (
+            "MATCH",
+            "fit→flipH→flipH (identity)",
+            vec![constrain_rect.clone(), flip_h(), flip_h()],
+            &src12x8,
+        ),
     ];
 
     // Extra source sizes needed by multi-category tests
@@ -1644,28 +1794,81 @@ fn audit_all_two_op_sequences() {
 
     // ── Multi-constrain last-wins ──
     let cases_multi: Vec<(&str, &str, Vec<Command>, &Grid)> = vec![
-        ("NN", "fit→fit (cascade)", vec![fit(10, 10), fit(6, 6)], &src20),
-        ("DIVERGE", "fit→fit→fit (rounding)", vec![fit(15, 15), fit(10, 10), fit(5, 5)], &src30x20),
-        ("NN", "fitcrop→distort", vec![fit_crop(10, 10), distort(8, 4)], &src20x10),
-        ("DIVERGE", "fit→pad→fit (pad lost)", vec![fit(10, 10), pad(5, 5, 5, 5), fit(8, 8)], &src20),
-        ("NN", "fit→crop→fit", vec![fit(10, 10), crop(2, 2, 6, 6), fit(3, 3)], &src20),
-        ("NN", "fit→flip→fit", vec![fit(6, 4), flip_h(), fit(3, 2)], &src12x8),
+        (
+            "NN",
+            "fit→fit (cascade)",
+            vec![fit(10, 10), fit(6, 6)],
+            &src20,
+        ),
+        (
+            "DIVERGE",
+            "fit→fit→fit (rounding)",
+            vec![fit(15, 15), fit(10, 10), fit(5, 5)],
+            &src30x20,
+        ),
+        (
+            "NN",
+            "fitcrop→distort",
+            vec![fit_crop(10, 10), distort(8, 4)],
+            &src20x10,
+        ),
+        (
+            "DIVERGE",
+            "fit→pad→fit (pad lost)",
+            vec![fit(10, 10), pad(5, 5, 5, 5), fit(8, 8)],
+            &src20,
+        ),
+        (
+            "NN",
+            "fit→crop→fit",
+            vec![fit(10, 10), crop(2, 2, 6, 6), fit(3, 3)],
+            &src20,
+        ),
+        (
+            "NN",
+            "fit→flip→fit",
+            vec![fit(6, 4), flip_h(), fit(3, 2)],
+            &src12x8,
+        ),
     ];
 
     // ── Orientation-fuses-across-crops ──
     let cases_fuse: Vec<(&str, &str, Vec<Command>, &Grid)> = vec![
-        ("DIVERGE", "flipH→crop→flipH", vec![flip_h(), crop(0, 0, 6, 8), flip_h()], &src12x8),
-        ("DIVERGE", "flipV→crop→flipV", vec![flip_v(), crop(0, 0, 8, 6), flip_v()], &src8x12),
-        ("DIVERGE", "crop→pad→crop", vec![crop(4, 4, 8, 8), pad(3, 3, 3, 3), crop(1, 1, 12, 12)], &src16),
+        (
+            "DIVERGE",
+            "flipH→crop→flipH",
+            vec![flip_h(), crop(0, 0, 6, 8), flip_h()],
+            &src12x8,
+        ),
+        (
+            "DIVERGE",
+            "flipV→crop→flipV",
+            vec![flip_v(), crop(0, 0, 8, 6), flip_v()],
+            &src8x12,
+        ),
+        (
+            "DIVERGE",
+            "crop→pad→crop",
+            vec![crop(4, 4, 8, 8), pad(3, 3, 3, 3), crop(1, 1, 12, 12)],
+            &src16,
+        ),
     ];
 
     // ── Padded viewports + constrain ──
-    let cases_pad: Vec<(&str, &str, Vec<Command>, &Grid)> = vec![
-        ("NN", "region_mixed→fit", vec![
-            region(RegionCoord::px(0), RegionCoord::px(-3), RegionCoord::pct(1.0), RegionCoord::px(7)),
+    let cases_pad: Vec<(&str, &str, Vec<Command>, &Grid)> = vec![(
+        "NN",
+        "region_mixed→fit",
+        vec![
+            region(
+                RegionCoord::px(0),
+                RegionCoord::px(-3),
+                RegionCoord::pct(1.0),
+                RegionCoord::px(7),
+            ),
             fit(5, 5),
-        ], &src10),
-    ];
+        ],
+        &src10,
+    )];
 
     type Case<'a> = (&'a str, &'a str, Vec<Command>, &'a Grid);
     // Run all categories
@@ -1730,7 +1933,8 @@ fn audit_all_two_op_sequences() {
     eprintln!("  NN artifact: {total_nn} (dimensions correct)");
     eprintln!("  By design:   {total_diverge}");
 
-    assert!(failures.is_empty(),
+    assert!(
+        failures.is_empty(),
         "Audit failures:\n{}",
         failures.join("\n")
     );
