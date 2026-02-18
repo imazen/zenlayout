@@ -11,5 +11,7 @@ categories = ["graphics", "multimedia::images", "no-std"]
 
 [features]
 default = ["std"]
-std = []
+std = ["alloc"]
+alloc = []
 svg = ["std"]
+riapi = ["alloc"]
