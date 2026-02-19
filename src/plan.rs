@@ -293,6 +293,7 @@ impl Padding {
 /// A JPEG decoder choosing among IDCT 1/1, 1/2, 1/4, 1/8 should pick
 /// the smallest level that produces dimensions ≥ `min_precise_decode_size`.
 /// If none qualifies, fall back to the smallest level ≥ `target_size`.
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct DecoderRequest {
     /// Crop region in pre-orientation source coordinates.
@@ -349,6 +350,25 @@ impl core::hash::Hash for DecoderRequest {
 }
 
 impl DecoderRequest {
+    /// Create a simple decoder request with no crop and no scaling ratio preference.
+    ///
+    /// `min_precise_decode_size` is set equal to `target_size` (no extra buffer).
+    pub fn new(target_size: Size, orientation: Orientation) -> Self {
+        Self {
+            crop: None,
+            target_size,
+            min_precise_decode_size: target_size,
+            orientation,
+            min_precise_scaling_ratio: None,
+        }
+    }
+
+    /// Set a crop region in pre-orientation source coordinates.
+    pub fn with_crop(mut self, crop: Rect) -> Self {
+        self.crop = Some(crop);
+        self
+    }
+
     /// Compute `min_precise_decode_size` from `target_size` and an optional ratio.
     fn compute_min_precise_decode_size(target: Size, ratio: Option<f64>) -> Size {
         match ratio {
@@ -363,6 +383,7 @@ impl DecoderRequest {
 }
 
 /// What the decoder actually did.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DecoderOffer {
     /// Dimensions of the decoded output.
@@ -382,9 +403,22 @@ impl DecoderOffer {
             orientation_applied: Orientation::Identity,
         }
     }
+
+    /// Set the orientation the decoder applied.
+    pub fn with_orientation_applied(mut self, orientation: Orientation) -> Self {
+        self.orientation_applied = orientation;
+        self
+    }
+
+    /// Set the crop the decoder applied.
+    pub fn with_crop_applied(mut self, crop: Rect) -> Self {
+        self.crop_applied = Some(crop);
+        self
+    }
 }
 
 /// Final layout plan after decoder negotiation.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LayoutPlan {
     /// What was requested of the decoder.
@@ -406,6 +440,72 @@ pub struct LayoutPlan {
     /// If [`Align::Extend`] was used, crop to these dimensions after encoding.
     /// Renderer should replicate edge pixels into the extension area.
     pub content_size: Option<Size>,
+}
+
+impl LayoutPlan {
+    /// Create a no-op identity plan (no resize, no trim, no orientation).
+    pub fn identity(size: Size) -> Self {
+        Self {
+            decoder_request: DecoderRequest::new(size, Orientation::Identity),
+            trim: None,
+            resize_to: size,
+            remaining_orientation: Orientation::Identity,
+            canvas: size,
+            placement: (0, 0),
+            canvas_color: CanvasColor::Transparent,
+            resize_is_identity: true,
+            content_size: None,
+        }
+    }
+
+    /// Set the decoder request.
+    pub fn with_decoder_request(mut self, request: DecoderRequest) -> Self {
+        self.decoder_request = request;
+        self
+    }
+
+    /// Set a trim rect to apply to decoder output.
+    pub fn with_trim(mut self, trim: Rect) -> Self {
+        self.trim = Some(trim);
+        self
+    }
+
+    /// Set the resize target dimensions.
+    pub fn with_resize_to(mut self, size: Size) -> Self {
+        self.resize_to = size;
+        self.resize_is_identity = false;
+        self
+    }
+
+    /// Set the remaining orientation after decoder contribution.
+    pub fn with_remaining_orientation(mut self, orientation: Orientation) -> Self {
+        self.remaining_orientation = orientation;
+        self
+    }
+
+    /// Set the canvas dimensions.
+    pub fn with_canvas(mut self, size: Size) -> Self {
+        self.canvas = size;
+        self
+    }
+
+    /// Set the placement offset on canvas.
+    pub fn with_placement(mut self, x: i32, y: i32) -> Self {
+        self.placement = (x, y);
+        self
+    }
+
+    /// Set the canvas background color.
+    pub fn with_canvas_color(mut self, color: CanvasColor) -> Self {
+        self.canvas_color = color;
+        self
+    }
+
+    /// Set the content size (for extend alignment).
+    pub fn with_content_size(mut self, size: Size) -> Self {
+        self.content_size = Some(size);
+        self
+    }
 }
 
 /// How to align output dimensions to codec-required multiples.
