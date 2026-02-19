@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v6
 
@@ -39,6 +39,58 @@ jobs:
 
       - name: Test (all additive features)
         run: cargo test --features "std,svg,riapi"
+
+  # ==========================================================================
+  # Native aarch64 testing
+  # ==========================================================================
+  test-aarch64:
+    name: Test aarch64 (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04-arm, name: Linux }
+          - { os: macos-latest, name: macOS }
+          - { os: windows-11-arm, name: Windows }
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test (default: std)
+        run: cargo test
+
+  # ==========================================================================
+  # WASM testing
+  # ==========================================================================
+  test-wasm:
+    name: Test WASM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasmtime
+        run: |
+          curl https://wasmtime.dev/install.sh -sSf | bash
+          echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
+
+      - name: Test WASM (no_std + alloc)
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: "wasmtime --dir=. --"
+        run: cargo test --target wasm32-wasip1 --no-default-features --features alloc --lib
 
   # ==========================================================================
   # Clippy
