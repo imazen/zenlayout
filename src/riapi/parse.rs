@@ -25,6 +25,7 @@ const KNOWN_EXTRAS: &[&str] = &[
     "builder",
     "cache",
     "decoder",
+    "decoder.min_precise_scaling_ratio",
     "dither",
     "down.colorspace",
     "down.filter",
@@ -39,6 +40,7 @@ const KNOWN_EXTRAS: &[&str] = &[
     "jpeg.chroma",
     "jpeg.progressive",
     "jpeg.quality",
+    "jpeg_idct_downscale_linear",
     "jxl.quality",
     "jxl.speed",
     "lossless",
@@ -277,32 +279,6 @@ fn dispatch_key(key: &str, value: &str, inst: &mut Instructions, warnings: &mut 
                     value: String::from(value),
                     reason: "expected hex color or CSS3 color name",
                 });
-            }
-        }
-
-        // Decoder hints
-        "decoder.min_precise_scaling_ratio" => {
-            if let Some(v) = parse_f64(value) {
-                if v > 0.0 {
-                    set_or_warn(
-                        &mut inst.min_precise_scaling_ratio,
-                        Some(v),
-                        key,
-                        value,
-                        warnings,
-                    );
-                }
-            }
-        }
-        "jpeg_idct_downscale_linear" => {
-            if let Some(b) = parse_bool(value) {
-                set_or_warn(
-                    &mut inst.jpeg_idct_downscale_linear,
-                    Some(b),
-                    key,
-                    value,
-                    warnings,
-                );
             }
         }
 

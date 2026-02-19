@@ -280,108 +280,23 @@ impl Padding {
 
 /// What the layout engine wants the decoder to do.
 ///
-/// Provides two size targets for decoder prescaling:
-///
-/// - **`target_size`** — the final output dimensions after high-quality resizing.
-///   The decoder must produce at least this many pixels; anything smaller forces
-///   upscaling. This is the *minimum acceptable* decode size.
-///
-/// - **`min_precise_decode_size`** — the minimum decode size for quality output.
-///   When [`min_precise_scaling_ratio`](Self::min_precise_scaling_ratio) is set,
-///   this is `target_size × ratio` (ceiling). Otherwise it equals `target_size`.
-///   Decoders with built-in downscaling (e.g. JPEG IDCT) should produce at least
-///   this many pixels so the high-quality resize engine has enough data.
-///
-/// A JPEG decoder choosing among IDCT 1/1, 1/2, 1/4, 1/8 should pick
-/// the smallest level that produces dimensions ≥ `min_precise_decode_size`.
-/// If none qualifies, fall back to the smallest level ≥ `target_size`.
+/// The decoder should apply the requested crop and orientation if possible,
+/// then produce output at or near `target_size`. The resize engine handles
+/// all quality-sensitive downscaling — decoders should decode at full
+/// resolution (or the nearest size their format supports).
 #[non_exhaustive]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DecoderRequest {
     /// Crop region in pre-orientation source coordinates.
     pub crop: Option<Rect>,
-    /// Final output dimensions after high-quality resizing.
+    /// Target dimensions for the resize step.
     ///
-    /// The decoder must produce at least this many pixels per axis.
-    /// Anything below this size requires upscaling in the resize step.
+    /// This is the size the layout engine will resize to. The decoder
+    /// should produce output at or above this size; the resize engine
+    /// handles the final downscale at high quality.
     pub target_size: Size,
-    /// Minimum decode size for quality output.
-    ///
-    /// When [`min_precise_scaling_ratio`](Self::min_precise_scaling_ratio) is set,
-    /// this equals `ceil(target_size × ratio)`. Otherwise equals `target_size`.
-    ///
-    /// Decoders should prefer producing at least this many pixels so the
-    /// resize engine has enough input for high-quality downscaling
-    /// (e.g. Lanczos needs ~2–3× the target for clean results).
-    pub min_precise_decode_size: Size,
     /// Orientation the engine would like the decoder to handle.
     pub orientation: Orientation,
-    /// Minimum ratio at which decoder-integrated downscaling (e.g. JPEG IDCT)
-    /// is considered precise enough. Below this ratio, the decoder should
-    /// decode at a larger size and let the resize engine handle scaling.
-    ///
-    /// For example, with `min_precise_scaling_ratio = Some(2.1)`, a JPEG
-    /// decoder with 1/2 IDCT downscaling (ratio 2.0) should skip it and
-    /// decode at full size, while 1/4 (ratio 4.0) is fine.
-    ///
-    /// `None` means the caller has no preference — use the decoder's default.
-    pub min_precise_scaling_ratio: Option<f64>,
-}
-
-impl PartialEq for DecoderRequest {
-    fn eq(&self, other: &Self) -> bool {
-        self.crop == other.crop
-            && self.target_size == other.target_size
-            && self.min_precise_decode_size == other.min_precise_decode_size
-            && self.orientation == other.orientation
-            && self.min_precise_scaling_ratio.map(f64::to_bits)
-                == other.min_precise_scaling_ratio.map(f64::to_bits)
-    }
-}
-
-impl Eq for DecoderRequest {}
-
-impl core::hash::Hash for DecoderRequest {
-    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-        self.crop.hash(state);
-        self.target_size.hash(state);
-        self.min_precise_decode_size.hash(state);
-        self.orientation.hash(state);
-        self.min_precise_scaling_ratio.map(f64::to_bits).hash(state);
-    }
-}
-
-impl DecoderRequest {
-    /// Create a simple decoder request with no crop and no scaling ratio preference.
-    ///
-    /// `min_precise_decode_size` is set equal to `target_size` (no extra buffer).
-    pub fn new(target_size: Size, orientation: Orientation) -> Self {
-        Self {
-            crop: None,
-            target_size,
-            min_precise_decode_size: target_size,
-            orientation,
-            min_precise_scaling_ratio: None,
-        }
-    }
-
-    /// Set a crop region in pre-orientation source coordinates.
-    pub fn with_crop(mut self, crop: Rect) -> Self {
-        self.crop = Some(crop);
-        self
-    }
-
-    /// Compute `min_precise_decode_size` from `target_size` and an optional ratio.
-    fn compute_min_precise_decode_size(target: Size, ratio: Option<f64>) -> Size {
-        match ratio {
-            Some(r) if r > 1.0 => {
-                let w = (target.width as f64 * r).ceil() as u32;
-                let h = (target.height as f64 * r).ceil() as u32;
-                Size::new(w.max(target.width), h.max(target.height))
-            }
-            _ => target,
-        }
-    }
 }
 
 /// What the decoder actually did.
@@ -448,7 +363,11 @@ impl LayoutPlan {
     /// Create a no-op identity plan (no resize, no trim, no orientation).
     pub fn identity(size: Size) -> Self {
         Self {
-            decoder_request: DecoderRequest::new(size, Orientation::Identity),
+            decoder_request: DecoderRequest {
+                crop: None,
+                target_size: size,
+                orientation: Orientation::Identity,
+            },
             trim: None,
             resize_to: size,
             remaining_orientation: Orientation::Identity,
@@ -970,7 +889,6 @@ pub struct Pipeline {
     constraint: Option<Constraint>,
     padding: Option<Padding>,
     limits: Option<OutputLimits>,
-    min_precise_scaling_ratio: Option<f64>,
 }
 
 impl Pipeline {
@@ -984,7 +902,6 @@ impl Pipeline {
             constraint: None,
             padding: None,
             limits: None,
-            min_precise_scaling_ratio: None,
         }
     }
 
@@ -1203,16 +1120,6 @@ impl Pipeline {
         self.pad(Padding::uniform(amount, color))
     }
 
-    /// Set the minimum scaling ratio for precise decoder downscaling.
-    ///
-    /// This value is passed through to [`DecoderRequest::min_precise_scaling_ratio`]
-    /// so the decoder consumer knows when to avoid built-in downscaling
-    /// (e.g. JPEG IDCT) in favor of a higher-quality resize engine.
-    pub fn min_precise_scaling_ratio(mut self, ratio: f64) -> Self {
-        self.min_precise_scaling_ratio = Some(ratio);
-        self
-    }
-
     /// Apply safety limits after layout computation.
     ///
     /// See [`OutputLimits`] for details on max/min/align behavior.
@@ -1231,7 +1138,7 @@ impl Pipeline {
             Some(SourceRegion::Region(r)) => (None, Some(r)),
             None => (None, None),
         };
-        let (ideal, mut request) = plan_from_parts(
+        plan_from_parts(
             self.source_w,
             self.source_h,
             self.orientation,
@@ -1240,13 +1147,7 @@ impl Pipeline {
             self.constraint.as_ref(),
             self.padding,
             self.limits.as_ref(),
-        )?;
-        request.min_precise_scaling_ratio = self.min_precise_scaling_ratio;
-        request.min_precise_decode_size = DecoderRequest::compute_min_precise_decode_size(
-            request.target_size,
-            self.min_precise_scaling_ratio,
-        );
-        Ok((ideal, request))
+        )
     }
 }
 
@@ -1383,13 +1284,10 @@ impl IdealLayout {
             content_size: None,
         };
 
-        let sec_target = Size::new(target_w, target_h);
         let sec_request = DecoderRequest {
             crop: secondary_crop,
-            min_precise_decode_size: sec_target,
-            target_size: sec_target,
+            target_size: Size::new(target_w, target_h),
             orientation: self.orientation,
-            min_precise_scaling_ratio: None,
         };
 
         (sec_ideal, sec_request)
@@ -1733,10 +1631,8 @@ pub fn compute_layout_sequential(
 
     let request = DecoderRequest {
         crop: source_crop_in_source,
-        min_precise_decode_size: layout.resize_to,
         target_size: layout.resize_to,
         orientation,
-        min_precise_scaling_ratio: None,
     };
 
     Ok((ideal, request))
@@ -1846,10 +1742,8 @@ fn plan_from_parts(
 
     let request = DecoderRequest {
         crop: source_crop_in_source,
-        min_precise_decode_size: layout.resize_to,
         target_size: layout.resize_to,
         orientation,
-        min_precise_scaling_ratio: None,
     };
 
     Ok((ideal, request))
@@ -5272,64 +5166,5 @@ mod tests {
         let (ideal, _) = compute_layout_sequential(&commands, 800, 600, None).unwrap();
         // Canvas should be expanded by 40 in each direction
         assert_eq!(ideal.layout.canvas, Size::new(440, 340));
-    }
-
-    // ── min_precise_decode_size ─────────────────────────────────────────
-
-    #[test]
-    fn min_precise_decode_size_equals_target_by_default() {
-        let (_, req) = Pipeline::new(4000, 3000).fit(500, 500).plan().unwrap();
-        assert_eq!(req.target_size, Size::new(500, 375));
-        assert_eq!(req.min_precise_decode_size, Size::new(500, 375));
-        assert!(req.min_precise_scaling_ratio.is_none());
-    }
-
-    #[test]
-    fn min_precise_decode_size_scaled_by_ratio() {
-        let (_, req) = Pipeline::new(4000, 3000)
-            .fit(500, 500)
-            .min_precise_scaling_ratio(2.0)
-            .plan()
-            .unwrap();
-        assert_eq!(req.target_size, Size::new(500, 375));
-        // ceil(500 * 2.0) = 1000, ceil(375 * 2.0) = 750
-        assert_eq!(req.min_precise_decode_size, Size::new(1000, 750));
-    }
-
-    #[test]
-    fn min_precise_decode_size_fractional_ratio_ceils() {
-        let (_, req) = Pipeline::new(4000, 3000)
-            .fit(200, 200)
-            .min_precise_scaling_ratio(2.1)
-            .plan()
-            .unwrap();
-        assert_eq!(req.target_size, Size::new(200, 150));
-        // ceil(200 * 2.1) = ceil(420.0) = 420
-        // ceil(150 * 2.1) = ceil(315.0) = 315
-        assert_eq!(req.min_precise_decode_size, Size::new(420, 315));
-    }
-
-    #[test]
-    fn min_precise_decode_size_ratio_1_equals_target() {
-        let (_, req) = Pipeline::new(4000, 3000)
-            .fit(500, 500)
-            .min_precise_scaling_ratio(1.0)
-            .plan()
-            .unwrap();
-        assert_eq!(req.target_size, Size::new(500, 375));
-        // ratio <= 1.0 means no extra buffer needed
-        assert_eq!(req.min_precise_decode_size, Size::new(500, 375));
-    }
-
-    #[test]
-    fn min_precise_decode_size_not_set_for_sequential() {
-        // compute_layout_sequential doesn't set ratio, so sizes match
-        let commands = [Command::Constrain(Constraint::new(
-            ConstraintMode::Fit,
-            500,
-            500,
-        ))];
-        let (_, req) = compute_layout_sequential(&commands, 4000, 3000, None).unwrap();
-        assert_eq!(req.target_size, req.min_precise_decode_size);
     }
 }

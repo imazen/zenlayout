@@ -147,11 +147,6 @@ impl Instructions {
             pipeline = pipeline.constrain(constraint);
         }
 
-        // Pass decoder hints through to DecoderRequest
-        if let Some(ratio) = self.min_precise_scaling_ratio {
-            pipeline = pipeline.min_precise_scaling_ratio(ratio);
-        }
-
         Ok(pipeline)
     }
 
