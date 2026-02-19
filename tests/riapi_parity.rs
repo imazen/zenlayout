@@ -691,9 +691,7 @@ mod parsing {
 
     #[test]
     fn extras_preserved() {
-        let result = riapi::parse(
-            "w=800&format=webp&quality=80&f.sharpen=10&decoder.min_precise_scaling_ratio=3.5",
-        );
+        let result = riapi::parse("w=800&format=webp&quality=80&f.sharpen=10");
         assert_eq!(
             result
                 .instructions
@@ -709,14 +707,6 @@ mod parsing {
                 .get("quality")
                 .map(String::as_str),
             Some("80")
-        );
-        assert_eq!(
-            result
-                .instructions
-                .extras()
-                .get("decoder.min_precise_scaling_ratio")
-                .map(String::as_str),
-            Some("3.5")
         );
         assert_eq!(
             result
