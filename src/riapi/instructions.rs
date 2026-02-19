@@ -58,6 +58,7 @@ pub enum Anchor1D {
 /// Produced by [`crate::riapi::parse()`], consumed by
 /// [`to_pipeline()`](Self::to_pipeline).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Instructions {
     /// Target width (`w`, `width`). Merged with `maxwidth`.
     pub w: Option<i32>,

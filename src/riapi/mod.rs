@@ -37,7 +37,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 /// Result of parsing a RIAPI query string.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ParseResult {
     /// Parsed layout instructions.
     pub instructions: Instructions,

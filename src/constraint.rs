@@ -281,7 +281,7 @@ impl SourceCrop {
 }
 
 /// Width × height dimensions in pixels.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Size {
     /// Width in pixels.
     pub width: u32,
@@ -297,7 +297,7 @@ impl Size {
 }
 
 /// Axis-aligned rectangle in pixel coordinates.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Rect {
     /// Left edge (pixels from origin).
     pub x: u32,
@@ -710,7 +710,8 @@ impl Constraint {
 ///
 ///     source_crop ──► resize_to ──► placed on canvas
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Layout {
     /// Original source dimensions.
     pub source: Size,

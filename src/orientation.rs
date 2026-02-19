@@ -41,9 +41,10 @@ use crate::constraint::{Rect, Size};
 /// | Rotate270   | 270° CW    | no       | yes         |
 /// ```
 #[non_exhaustive]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Orientation {
     /// No transformation. EXIF 1.
+    #[default]
     Identity,
     /// Horizontal flip. EXIF 2.
     FlipH,

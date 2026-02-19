@@ -228,7 +228,8 @@ pub enum Command {
 }
 
 /// Result of the first phase of layout planning.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct IdealLayout {
     /// Net orientation to apply.
     pub orientation: Orientation,
@@ -244,7 +245,8 @@ pub struct IdealLayout {
 }
 
 /// Explicit padding specification.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Padding {
     /// Top padding in pixels.
     pub top: u32,
@@ -600,7 +602,8 @@ impl Subsampling {
 /// Geometry for a single image plane (luma or chroma).
 ///
 /// All dimensions in pixels. Block size is always 8×8 (DCT block).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct PlaneLayout {
     /// Content dimensions in pixels.
     pub content: Size,
@@ -625,10 +628,7 @@ pub struct PlaneLayout {
 ///
 /// let (ideal, _) = Pipeline::new(4000, 3000)
 ///     .fit(800, 600)
-///     .output_limits(OutputLimits {
-///         align: Some(Subsampling::S420.mcu_align()),
-///         ..Default::default()
-///     })
+///     .output_limits(OutputLimits::default().with_align(Subsampling::S420.mcu_align()))
 ///     .plan()
 ///     .unwrap();
 ///
@@ -640,6 +640,7 @@ pub struct PlaneLayout {
 /// assert_eq!(codec.luma_rows_per_mcu, 16);
 /// ```
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct CodecLayout {
     /// Luma (Y) plane layout.
     pub luma: PlaneLayout,
@@ -707,6 +708,12 @@ impl CodecLayout {
     }
 }
 
+impl Default for CodecLayout {
+    fn default() -> Self {
+        Self::new(Size::default(), Subsampling::S444)
+    }
+}
+
 /// Post-computation safety limits applied after all layout computation.
 ///
 /// All limits target the **canvas** (the encoded output dimensions):
@@ -735,6 +742,7 @@ impl CodecLayout {
 ///     Final Layout
 /// ```
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct OutputLimits {
     /// Maximum canvas dimensions. If exceeded, everything scales down proportionally.
     pub max: Option<Size>,
@@ -745,6 +753,24 @@ pub struct OutputLimits {
 }
 
 impl OutputLimits {
+    /// Set maximum canvas dimensions.
+    pub fn with_max(mut self, max: Size) -> Self {
+        self.max = Some(max);
+        self
+    }
+
+    /// Set minimum canvas dimensions.
+    pub fn with_min(mut self, min: Size) -> Self {
+        self.min = Some(min);
+        self
+    }
+
+    /// Set alignment constraint.
+    pub fn with_align(mut self, align: Align) -> Self {
+        self.align = Some(align);
+        self
+    }
+
     /// Apply limits to a computed layout.
     ///
     /// Returns the modified layout and an optional content_size. If [`Align::Extend`]
