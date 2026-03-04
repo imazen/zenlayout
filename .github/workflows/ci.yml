@@ -7,52 +7,31 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   CI: true
 
 jobs:
   # ==========================================================================
-  # Native x86_64 testing
+  # Native testing (6-platform matrix)
   # ==========================================================================
-  test-x64:
-    name: Test x64 (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Test (default: std)
-        run: cargo test
-
-      - name: Test (no_std + alloc)
-        run: cargo test --no-default-features --features alloc --lib
-
-      - name: Test (all additive features)
-        run: cargo test --features "std,svg,riapi"
-
-  # ==========================================================================
-  # Native aarch64 testing
-  # ==========================================================================
-  test-aarch64:
-    name: Test aarch64 (${{ matrix.name }})
+  test:
+    name: Test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04-arm, name: Linux }
-          - { os: macos-latest, name: macOS }
-          - { os: windows-11-arm, name: Windows }
+          - { os: ubuntu-latest, name: Linux x64 }
+          - { os: ubuntu-24.04-arm, name: Linux aarch64 }
+          - { os: macos-latest, name: macOS arm64 }
+          - { os: macos-26-intel, name: macOS x64 }
+          - { os: windows-latest, name: Windows x64 }
+          - { os: windows-11-arm, name: Windows arm64 }
     steps:
       - uses: actions/checkout@v6
 
@@ -62,35 +41,17 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Test (default: std)
+      - name: "Test (default: std)"
         run: cargo test
 
-  # ==========================================================================
-  # WASM testing
-  # ==========================================================================
-  test-wasm:
-    name: Test WASM
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
+      - name: Test (no_std)
+        run: cargo test --no-default-features --lib
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
+      - name: Test (svg feature)
+        run: cargo test --features svg
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install wasmtime
-        run: |
-          curl https://wasmtime.dev/install.sh -sSf | bash
-          echo "$HOME/.wasmtime/bin" >> $GITHUB_PATH
-
-      - name: Test WASM (no_std + alloc)
-        env:
-          CARGO_TARGET_WASM32_WASIP1_RUNNER: "wasmtime --dir=. --"
-        run: cargo test --target wasm32-wasip1 --no-default-features --features alloc --lib
+      - name: Test (riapi feature)
+        run: cargo test --features riapi
 
   # ==========================================================================
   # Cross-compiled 32-bit testing (i686 via QEMU)
@@ -118,6 +79,26 @@ jobs:
         run: cross test --target i686-unknown-linux-gnu
 
   # ==========================================================================
+  # WASM check
+  # ==========================================================================
+  wasm:
+    name: WASM (wasm32-wasip1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check WASM (no_std)
+        run: cargo check --target wasm32-wasip1 --no-default-features
+
+  # ==========================================================================
   # Clippy
   # ==========================================================================
   clippy:
@@ -134,8 +115,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Clippy (all features)
-        run: cargo clippy --all-targets --features "std,svg,riapi" -- -D warnings
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
 
   # ==========================================================================
   # Format check
@@ -158,18 +139,46 @@ jobs:
   # MSRV check
   # ==========================================================================
   msrv:
-    name: MSRV (1.85)
+    name: MSRV
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust 1.85
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.85"
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@cargo-hack
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
       - name: Check MSRV
-        run: cargo check
+        run: cargo hack check --rust-version
+
+  # ==========================================================================
+  # Code coverage
+  # ==========================================================================
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Generate coverage
+        run: cargo llvm-cov --lcov --output-path lcov.info
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

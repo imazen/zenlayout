@@ -31,6 +31,7 @@ mod convert;
 pub mod instructions;
 mod parse;
 
+pub use color::parse_color;
 pub use instructions::{Anchor1D, FitMode, Instructions, ScaleMode};
 
 use alloc::string::String;

@@ -299,6 +299,23 @@ pub struct DecoderRequest {
     pub orientation: Orientation,
 }
 
+impl DecoderRequest {
+    /// Create a new decoder request.
+    pub fn new(target_size: Size, orientation: Orientation) -> Self {
+        Self {
+            crop: None,
+            target_size,
+            orientation,
+        }
+    }
+
+    /// Add a crop region.
+    pub fn with_crop(mut self, crop: Rect) -> Self {
+        self.crop = Some(crop);
+        self
+    }
+}
+
 /// What the decoder actually did.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

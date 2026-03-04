@@ -10,7 +10,7 @@ use crate::CanvasColor;
 /// - `#RRGGBB` / `RRGGBB` — 6-digit hex, alpha = 0xFF
 /// - `#RRGGBBAA` / `RRGGBBAA` — 8-digit hex
 /// - CSS3 named colors (case-insensitive): `red`, `transparent`, etc.
-pub(crate) fn parse_color(s: &str) -> Option<CanvasColor> {
+pub fn parse_color(s: &str) -> Option<CanvasColor> {
     let s = s.trim();
     if s.is_empty() {
         return None;

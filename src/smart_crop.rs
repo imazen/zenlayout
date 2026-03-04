@@ -189,10 +189,7 @@ pub fn compute_crop(
         return None;
     }
 
-    let qualifying: Vec<&FocusRect> = focus_regions
-        .iter()
-        .filter(|f| f.weight >= 0.5)
-        .collect();
+    let qualifying: Vec<&FocusRect> = focus_regions.iter().filter(|f| f.weight >= 0.5).collect();
 
     match config.mode {
         CropMode::Minimal => minimal_crop(src_w, src_h, &qualifying, heatmap, config),
@@ -556,14 +553,7 @@ fn expand_to_aspect(x1: &mut f64, y1: &mut f64, x2: &mut f64, y2: &mut f64, rati
 }
 
 /// Clamp a rectangle to image bounds, preserving size.
-fn clamp_rect_to_bounds(
-    x1: &mut f64,
-    y1: &mut f64,
-    x2: &mut f64,
-    y2: &mut f64,
-    sw: f64,
-    sh: f64,
-) {
+fn clamp_rect_to_bounds(x1: &mut f64, y1: &mut f64, x2: &mut f64, y2: &mut f64, sw: f64, sh: f64) {
     let w = *x2 - *x1;
     let h = *y2 - *y1;
     if *x1 < 0.0 {
@@ -865,7 +855,11 @@ mod tests {
 
         assert_crop_inside(&crop, 1920, 1080);
         assert_approx_aspect(&crop, PORTRAIT_9_16, 0.01);
-        assert!(crop.x > 600, "crop should be shifted right, got x={}", crop.x);
+        assert!(
+            crop.x > 600,
+            "crop should be shifted right, got x={}",
+            crop.x
+        );
     }
 
     #[test]
