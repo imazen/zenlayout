@@ -53,6 +53,9 @@ jobs:
       - name: Test (riapi feature)
         run: cargo test --features riapi
 
+      - name: Test (smart-crop feature)
+        run: cargo test --features smart-crop
+
   # ==========================================================================
   # Cross-compiled 32-bit testing (i686 via QEMU)
   # ==========================================================================

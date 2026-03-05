@@ -306,34 +306,15 @@ assert_eq!(codec.mcu_cols, 50);
 assert_eq!(codec.luma_rows_per_mcu, 16);
 ```
 
-## Smart crop
-
-Content-aware cropping for multiple aspect ratios. Given focus regions (faces, objects) and/or a saliency heatmap, computes optimal crop rectangles. Requires `alloc` feature.
-
-```rust
-use zenlayout::smart_crop::*;
-
-let faces = vec![
-    FocusRect { x1: 40.0, y1: 30.0, x2: 60.0, y2: 60.0, weight: 0.9 },
-];
-let input = SmartCropInput { focus_regions: faces, heatmap: None };
-
-let targets = [
-    (AspectRatio { w: 9, h: 16 }, CropMode::Minimal),
-    (AspectRatio { w: 1, h: 1 }, CropMode::Minimal),
-    (AspectRatio { w: 16, h: 9 }, CropMode::Minimal),
-];
-let crops = input.compute_crops(1920, 1080, &targets);
-```
-
 ## Feature flags
 
 | Flag | Default | Implies | Description |
 |------|---------|---------|-------------|
 | `std` | **yes** | `alloc` | Standard library. Enables `Error` impl for `LayoutError`. |
-| `alloc` | via `std` | — | Heap allocation (`Vec`, `BTreeMap`). Enables `compute_layout_sequential` and `smart_crop`. |
+| `alloc` | via `std` | — | Heap allocation (`Vec`, `BTreeMap`). Enables `compute_layout_sequential`. |
 | `riapi` | no | `alloc` | RIAPI query string parsing (`?w=800&h=600&mode=crop`). |
 | `svg` | no | `std` | SVG visualization of layout pipeline steps. |
+| `smart-crop` | no | `alloc` | Content-aware cropping (experimental, API unstable). |
 
 The core API (`Pipeline`, `Constraint::compute()`, `compute_layout()`) works with zero features — `no_std`, no heap. `Pipeline::plan()` makes zero heap allocations.
 

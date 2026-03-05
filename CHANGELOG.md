@@ -9,7 +9,7 @@
   - Background color via hex or CSS3 named colors
   - Non-layout keys preserved in `extras` for downstream consumers
   - Comprehensive parity tests against legacy RIAPI behavior
-- **Smart crop module** for content-aware cropping (`smart_crop`, requires `alloc`)
+- **Smart crop module** for content-aware cropping (`smart-crop` feature, experimental)
 - **SVG visualization** of layout pipeline steps (`svg` feature)
 - **`PadWithin` constraint mode** — never upscales, always pads to target canvas
 - **`NonFiniteFloat` error variant** — NaN/Inf rejected at all API boundaries

@@ -29,6 +29,9 @@ use crate::constraint::{
 use crate::float_math::F64Ext;
 use crate::orientation::Orientation;
 
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
+
 /// Rotation amount for manual rotation commands.
 #[non_exhaustive]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]

@@ -23,7 +23,7 @@ pub mod orientation;
 pub mod plan;
 #[cfg(feature = "riapi")]
 pub mod riapi;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "smart-crop")]
 pub mod smart_crop;
 #[cfg(feature = "svg")]
 pub mod svg;

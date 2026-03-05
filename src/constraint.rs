@@ -1055,6 +1055,12 @@ fn rounding_loss_height(ratio_w: u32, ratio_h: u32, target_height: u32) -> f64 {
 mod tests {
     use super::*;
 
+    extern crate alloc;
+    use alloc::format;
+    use alloc::string::String;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
     // ── fit_inside ──────────────────────────────────────────────────────
 
     #[test]
@@ -2229,6 +2235,8 @@ mod tests {
 
     #[allow(dead_code)]
     mod oracle {
+        use alloc::vec;
+        use alloc::vec::Vec;
         use crate::float_math::F64Ext;
         use core::cmp::Ordering;
 
