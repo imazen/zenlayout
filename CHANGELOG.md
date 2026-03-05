@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (since v0.1.0)
+## 0.2.0
 
 ### Added
 - **RIAPI query string parsing** — `riapi` feature (`?w=800&h=600&mode=crop`)
