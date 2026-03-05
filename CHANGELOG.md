@@ -3,20 +3,30 @@
 ## Unreleased (since v0.1.0)
 
 ### Added
-- **Smart crop module** for content-aware cropping (`smart_crop`)
-- **RIAPI query string parsing** — Phase 1 (`riapi` feature)
+- **RIAPI query string parsing** — `riapi` feature (`?w=800&h=600&mode=crop`)
+  - Full mode/scale matrix: Max, Pad, Crop, Stretch, AspectCrop combined with DownscaleOnly, Both, UpscaleOnly, UpscaleCanvas
+  - Crop, anchor/gravity, orientation (srotate/sflip/rotate/flip), zoom/DPR
+  - Background color via hex or CSS3 named colors
+  - Non-layout keys preserved in `extras` for downstream consumers
   - Comprehensive parity tests against legacy RIAPI behavior
+- **Smart crop module** for content-aware cropping (`smart_crop`, requires `alloc`)
 - **SVG visualization** of layout pipeline steps (`svg` feature)
-  - Region, rotation, and orientation SVG examples
-  - Improved visual language with size variation
+- **`PadWithin` constraint mode** — never upscales, always pads to target canvas
+- **`NonFiniteFloat` error variant** — NaN/Inf rejected at all API boundaries
+- **NaN/Inf validation** at `Constraint::compute()`, `Instructions::to_pipeline()`, and region resolution
+- `#[non_exhaustive]` on all public enums and structs
+- `Default` on most public types (excludes `DecoderRequest`, `DecoderOffer`, `LayoutPlan`)
 - Layout pipeline examples with SVG diagrams (`doc/layout-examples.md`)
-- `#[non_exhaustive]` on all public structs; `Default` on most (excludes `DecoderRequest`, `DecoderOffer`, `LayoutPlan`)
-- Decoder hint promotion to first-class RIAPI fields
 - AGPL-3.0-or-later license file
-- Comprehensive CI: 6-platform matrix, i686 cross-compilation, WASM, Codecov
+- CI: 6-platform matrix (Linux/macOS/Windows, x64/arm64), i686 cross-compilation, WASM, MSRV check, Codecov
+
+### Fixed
+- `no_std` compilation — float math (`round`/`floor`/`ceil`) via internal `F64Ext` trait
+- `UpscaleOnly` and `UpscaleCanvas` scale modes in RIAPI layer (previously unimplemented)
 
 ### Changed
 - Edition 2024, MSRV 1.89
+- `compute_layout_sequential` gated behind `alloc` feature (uses `Vec`)
 
 ## 0.1.0
 
