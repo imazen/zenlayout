@@ -26,6 +26,7 @@
 use crate::constraint::{
     CanvasColor, Constraint, ConstraintMode, Layout, LayoutError, Rect, Size, SourceCrop,
 };
+use crate::float_math::F64Ext;
 use crate::orientation::Orientation;
 
 /// Rotation amount for manual rotation commands.
@@ -90,7 +91,7 @@ impl RegionCoord {
 
     /// Resolve to absolute pixel coordinate given source dimension.
     pub fn resolve(self, source_dim: u32) -> i32 {
-        (source_dim as f64 * self.percent as f64).round() as i32 + self.pixels
+        (source_dim as f64 * self.percent as f64).round_() as i32 + self.pixels
     }
 }
 
@@ -854,16 +855,16 @@ impl OutputLimits {
     /// Scale all layout dimensions by a factor.
     fn scale_layout(layout: &mut Layout, scale: f64) {
         layout.resize_to = Size::new(
-            (layout.resize_to.width as f64 * scale).round().max(1.0) as u32,
-            (layout.resize_to.height as f64 * scale).round().max(1.0) as u32,
+            (layout.resize_to.width as f64 * scale).round_().max(1.0) as u32,
+            (layout.resize_to.height as f64 * scale).round_().max(1.0) as u32,
         );
         layout.canvas = Size::new(
-            (layout.canvas.width as f64 * scale).round().max(1.0) as u32,
-            (layout.canvas.height as f64 * scale).round().max(1.0) as u32,
+            (layout.canvas.width as f64 * scale).round_().max(1.0) as u32,
+            (layout.canvas.height as f64 * scale).round_().max(1.0) as u32,
         );
         layout.placement = (
-            (layout.placement.0 as f64 * scale).round() as i32,
-            (layout.placement.1 as f64 * scale).round() as i32,
+            (layout.placement.0 as f64 * scale).round_() as i32,
+            (layout.placement.1 as f64 * scale).round_() as i32,
         );
     }
 }
@@ -1278,8 +1279,8 @@ impl IdealLayout {
             None => {
                 // Auto: maintain source ratio relative to primary output.
                 let (pri_rw, pri_rh) = (self.layout.resize_to.width, self.layout.resize_to.height);
-                let tw = (pri_rw as f64 * scale_x).round().max(1.0) as u32;
-                let th = (pri_rh as f64 * scale_y).round().max(1.0) as u32;
+                let tw = (pri_rw as f64 * scale_x).round_().max(1.0) as u32;
+                let th = (pri_rh as f64 * scale_y).round_().max(1.0) as u32;
                 (tw, th)
             }
         };
@@ -1326,13 +1327,13 @@ fn round_to_nearest(v: u32, n: u32) -> u32 {
 /// to the target dimensions. This ensures the scaled rect always covers
 /// at least the full spatial extent of the original.
 fn scale_rect_outward(rect: Rect, scale_x: f64, scale_y: f64, max_w: u32, max_h: u32) -> Rect {
-    let x0 = (rect.x as f64 * scale_x).floor() as u32;
-    let y0 = (rect.y as f64 * scale_y).floor() as u32;
+    let x0 = (rect.x as f64 * scale_x).floor_() as u32;
+    let y0 = (rect.y as f64 * scale_y).floor_() as u32;
     let x1 = ((rect.x + rect.width) as f64 * scale_x)
-        .ceil()
+        .ceil_()
         .min(max_w as f64) as u32;
     let y1 = ((rect.y + rect.height) as f64 * scale_y)
-        .ceil()
+        .ceil_()
         .min(max_h as f64) as u32;
     Rect::new(x0, y0, (x1 - x0).max(1), (y1 - y0).max(1))
 }
@@ -1417,6 +1418,7 @@ pub fn compute_layout(
     )
 }
 
+#[cfg(feature = "alloc")]
 /// Compute layout from command sequence with sequential evaluation.
 ///
 /// Unlike [`compute_layout()`] which uses fixed-pipeline semantics (first-wins),
@@ -1659,6 +1661,7 @@ pub fn compute_layout_sequential(
     Ok((ideal, request))
 }
 
+#[cfg(feature = "alloc")]
 /// Compose two regions: `outer` defines a viewport, `inner` is relative to
 /// that viewport's coordinate system. Result is in the original source coords.
 fn compose_regions(outer: Region, inner: Region, source_w: u32, source_h: u32) -> Region {
@@ -1853,10 +1856,10 @@ fn resolve_region(
             let scale_y = viewport_layout.resize_to.height as f64 / vh as f64;
 
             // Content dimensions scaled by the same factor as the viewport.
-            let content_w = (overlap_w as f64 * scale_x).round().max(1.0) as u32;
-            let content_h = (overlap_h as f64 * scale_y).round().max(1.0) as u32;
-            let content_place_x = (place_x as f64 * scale_x).round() as i32;
-            let content_place_y = (place_y as f64 * scale_y).round() as i32;
+            let content_w = (overlap_w as f64 * scale_x).round_().max(1.0) as u32;
+            let content_h = (overlap_h as f64 * scale_y).round_().max(1.0) as u32;
+            let content_place_x = (place_x as f64 * scale_x).round_() as i32;
+            let content_place_y = (place_y as f64 * scale_y).round_() as i32;
 
             // Use the constraint's canvas (which may include its own padding
             // for FitPad/WithinPad), adjusted for the viewport placement.
@@ -3621,10 +3624,10 @@ mod tests {
 
         // Round outward: origin floors, far edge ceils
         let scale: f64 = 333.0 / 1000.0;
-        let x0 = (100.0_f64 * scale).floor() as u32;
-        let y0 = (100.0_f64 * scale).floor() as u32;
-        let x1 = (700.0_f64 * scale).ceil() as u32;
-        let y1 = (700.0_f64 * scale).ceil() as u32;
+        let x0 = (100.0_f64 * scale).floor_() as u32;
+        let y0 = (100.0_f64 * scale).floor_() as u32;
+        let x1 = (700.0_f64 * scale).ceil_() as u32;
+        let y1 = (700.0_f64 * scale).ceil_() as u32;
         assert_eq!(crop.x, x0);
         assert_eq!(crop.y, y0);
         assert_eq!(crop.width, x1 - x0);

@@ -16,6 +16,8 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+mod float_math;
+
 pub mod constraint;
 pub mod orientation;
 pub mod plan;
@@ -34,5 +36,7 @@ pub use orientation::Orientation;
 pub use plan::{
     Align, CodecLayout, Command, DecoderOffer, DecoderRequest, FlipAxis, IdealLayout, LayoutPlan,
     OutputLimits, Padding, Pipeline, PlaneLayout, Region, RegionCoord, Rotation, Subsampling,
-    compute_layout, compute_layout_sequential,
+    compute_layout,
 };
+#[cfg(feature = "alloc")]
+pub use plan::compute_layout_sequential;

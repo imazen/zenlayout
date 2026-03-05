@@ -33,6 +33,7 @@
 use alloc::vec::Vec;
 
 use crate::Rect;
+use crate::float_math::F64Ext;
 
 /// A weighted region of interest, in percentage coordinates (0.0–100.0).
 ///
@@ -253,8 +254,8 @@ fn minimal_crop(
     }
 
     Some(Rect {
-        x: x.round() as u32,
-        y: y.round() as u32,
+        x: x.round_() as u32,
+        y: y.round_() as u32,
         width: crop_w,
         height: crop_h,
     })
@@ -319,15 +320,15 @@ fn maximal_crop(
         config.target_aspect,
     );
 
-    let crop_w = (sx2 - sx1).round() as u32;
-    let crop_h = (sy2 - sy1).round() as u32;
+    let crop_w = (sx2 - sx1).round_() as u32;
+    let crop_h = (sy2 - sy1).round_() as u32;
     if crop_w == 0 || crop_h == 0 {
         return None;
     }
 
     Some(Rect {
-        x: sx1.round() as u32,
-        y: sy1.round() as u32,
+        x: sx1.round_() as u32,
+        y: sy1.round_() as u32,
         width: crop_w,
         height: crop_h,
     })
@@ -346,10 +347,10 @@ fn largest_rect_at_ratio(src_w: u32, src_h: u32, ratio: AspectRatio) -> (u32, u3
 
     let h_if_w = sw * rh / rw;
     if h_if_w <= sh {
-        (src_w, h_if_w.floor() as u32)
+        (src_w, h_if_w.floor_() as u32)
     } else {
         let w_if_h = sh * rw / rh;
-        (w_if_h.floor() as u32, src_h)
+        (w_if_h.floor_() as u32, src_h)
     }
 }
 
@@ -397,8 +398,8 @@ fn subject_region(
             .filter(|f| {
                 let fcx = (f.x1 as f64 + f.x2 as f64) / 2.0 / 100.0 * sw;
                 let fcy = (f.y1 as f64 + f.y2 as f64) / 2.0 / 100.0 * sh;
-                let dist = ((fcx - pcx) * (fcx - pcx) + (fcy - pcy) * (fcy - pcy)).sqrt();
-                dist <= pw * 2.0
+                let dist_sq = (fcx - pcx) * (fcx - pcx) + (fcy - pcy) * (fcy - pcy);
+                dist_sq <= (pw * 2.0) * (pw * 2.0)
             })
             .collect();
 
