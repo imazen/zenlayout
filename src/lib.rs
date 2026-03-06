@@ -33,10 +33,10 @@ pub use constraint::{
     CanvasColor, Constraint, ConstraintMode, Gravity, Layout, LayoutError, Rect, Size, SourceCrop,
 };
 pub use orientation::Orientation;
+#[cfg(feature = "alloc")]
+pub use plan::compute_layout_sequential;
 pub use plan::{
     Align, CodecLayout, Command, DecoderOffer, DecoderRequest, FlipAxis, IdealLayout, LayoutPlan,
     OutputLimits, Padding, Pipeline, PlaneLayout, Region, RegionCoord, Rotation, Subsampling,
     compute_layout,
 };
-#[cfg(feature = "alloc")]
-pub use plan::compute_layout_sequential;

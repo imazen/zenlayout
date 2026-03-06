@@ -849,9 +849,7 @@ impl core::fmt::Display for LayoutError {
             Self::ZeroRegionDimension => {
                 f.write_str("region viewport has zero or negative width or height")
             }
-            Self::NonFiniteFloat => {
-                f.write_str("a float parameter contains NaN or infinity")
-            }
+            Self::NonFiniteFloat => f.write_str("a float parameter contains NaN or infinity"),
         }
     }
 }
@@ -2234,9 +2232,9 @@ mod tests {
 
     #[allow(dead_code)]
     mod oracle {
+        use crate::float_math::F64Ext;
         use alloc::vec;
         use alloc::vec::Vec;
-        use crate::float_math::F64Ext;
         use core::cmp::Ordering;
 
         /// Aspect ratio / size pair (mirrors imageflow's AspectRatio).

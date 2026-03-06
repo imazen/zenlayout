@@ -150,9 +150,7 @@ impl Instructions {
                 let fx = if eff_w > clip_w {
                     match gravity {
                         Gravity::Center => (eff_w - clip_w) as f32 / (2.0 * eff_w as f32),
-                        Gravity::Percentage(x, _) => {
-                            (eff_w - clip_w) as f32 * x / eff_w as f32
-                        }
+                        Gravity::Percentage(x, _) => (eff_w - clip_w) as f32 * x / eff_w as f32,
                     }
                 } else {
                     0.0
@@ -160,9 +158,7 @@ impl Instructions {
                 let fy = if eff_h > clip_h {
                     match gravity {
                         Gravity::Center => (eff_h - clip_h) as f32 / (2.0 * eff_h as f32),
-                        Gravity::Percentage(_, y) => {
-                            (eff_h - clip_h) as f32 * y / eff_h as f32
-                        }
+                        Gravity::Percentage(_, y) => (eff_h - clip_h) as f32 * y / eff_h as f32,
                     }
                 } else {
                     0.0
