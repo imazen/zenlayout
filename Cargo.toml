@@ -18,4 +18,4 @@ riapi = ["alloc"]
 smart-crop = ["alloc"]
 
 [dependencies]
-whereat = { path = "/home/lilith/work/whereat", default-features = false }
+whereat = { path = "../whereat", default-features = false }
