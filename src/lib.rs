@@ -30,7 +30,7 @@ pub mod smart_crop;
 #[cfg(feature = "svg")]
 pub mod svg;
 #[cfg(feature = "zennode")]
-pub mod zenode_defs;
+pub mod zennode_defs;
 
 // Re-exports: core types from constraint module
 pub use constraint::{
