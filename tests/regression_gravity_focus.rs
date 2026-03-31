@@ -414,6 +414,12 @@ mod focus_smart_crop {
             focus_inside_crop(&face, &crop, 1920, 1080),
             "face center should be inside the crop: crop={crop:?}"
         );
+
+        let frac = overlap_fraction(&face, &crop, 1920, 1080);
+        assert!(
+            frac >= 0.5,
+            "at least 50% of the focus region should be visible: overlap={frac:.4}"
+        );
     }
 
     #[test]
@@ -449,16 +455,23 @@ mod focus_smart_crop {
             focus_inside_crop(&face, &crop, 1920, 1080),
             "corner face center should be inside the crop: crop={crop:?}"
         );
+
+        let frac = overlap_fraction(&face, &crop, 1920, 1080);
+        assert!(
+            frac >= 0.5,
+            "at least 50% of the corner focus region should be visible: overlap={frac:.4}"
+        );
     }
 
-    // ── SmartCropInput::compute_crop with focus at (0.2, 0.5, 0.6, 0.9) ──
-    // on a 1000x1000 image for 1:1 aspect ratio keeps focus region inside.
+    // ── SmartCropInput::compute_crop with focus at (20%, 50%) to (60%, 90%) ──
+    // on a 1000x1000 image for 3:4 aspect ratio keeps focus region inside.
 
     #[test]
-    fn compute_crop_focus_region_preserved_square_crop() {
+    fn compute_crop_focus_region_preserved_3_4_on_square() {
         // Focus region at (20%, 50%) to (60%, 90%) on a 1000x1000 image.
-        // 1:1 aspect ratio — minimal crop should be the full 1000x1000.
-        // But let's verify the focus region is fully inside.
+        // 3:4 portrait aspect ratio — requires cropping width to 750px.
+        // The focus center X is at 40% (400px), so the crop should shift
+        // left to keep the focus region visible.
         let focus = FocusRect {
             x1: 20.0,
             y1: 50.0,
@@ -471,20 +484,24 @@ mod focus_smart_crop {
             heatmap: None,
         };
         let config = CropConfig {
-            target_aspect: SQUARE,
+            target_aspect: PORTRAIT_3_4,
             mode: CropMode::Minimal,
             ..CropConfig::default()
         };
         let crop = input.compute_crop(1000, 1000, &config).unwrap();
 
-        // For a 1000x1000 source and 1:1 target, minimal crop = full image.
-        assert_eq!(crop.width, 1000, "1:1 on square source → full width");
-        assert_eq!(crop.height, 1000, "1:1 on square source → full height");
+        assert_eq!(crop.height, 1000, "3:4 on square → full height");
+        assert_eq!(crop.width, 750, "3:4 on 1000px height → 750px width");
+
+        assert!(
+            focus_inside_crop(&focus, &crop, 1000, 1000),
+            "focus center should be inside crop: crop={crop:?}"
+        );
 
         let frac = overlap_fraction(&focus, &crop, 1000, 1000);
         assert!(
-            frac >= 1.0 - 1e-6,
-            "focus region should be fully inside: overlap={frac:.4}"
+            frac >= 0.7,
+            "at least 70% of focus region should be visible: overlap={frac:.4}"
         );
     }
 
@@ -621,10 +638,23 @@ mod focus_smart_crop {
             crop.width < 1000 || crop.height < 1000,
             "maximal mode should zoom in: crop={crop:?}"
         );
+        // Crop area should be significantly smaller than source area.
+        let crop_area = crop.width as u64 * crop.height as u64;
+        let src_area = 1000u64 * 1000;
+        assert!(
+            crop_area * 100 < src_area * 75,
+            "maximal crop area should be < 75% of source: crop_area={crop_area}, src_area={src_area}"
+        );
         // Focus center should still be inside.
         assert!(
             focus_inside_crop(&focus, &crop, 1000, 1000),
             "focus center should remain inside maximal crop: crop={crop:?}"
+        );
+        // Significant overlap with the focus region.
+        let frac = overlap_fraction(&focus, &crop, 1000, 1000);
+        assert!(
+            frac >= 0.7,
+            "maximal crop should cover at least 70% of focus region: overlap={frac:.4}"
         );
     }
 }
