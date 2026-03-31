@@ -21,8 +21,12 @@ mod c_gravity {
     ) -> zenlayout::plan::IdealLayout {
         let result = riapi::parse(query);
         for w in &result.warnings {
-            if matches!(w, riapi::ParseWarning::ValueInvalid { .. }) {
-                panic!("unexpected parse error for {query:?}: {w:?}");
+            if matches!(
+                w,
+                riapi::ParseWarning::ValueInvalid { .. }
+                    | riapi::ParseWarning::KeyNotRecognized { .. }
+            ) {
+                panic!("unexpected parse warning for {query:?}: {w:?}");
             }
         }
         let pipeline = result
