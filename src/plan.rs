@@ -214,7 +214,7 @@ impl SourceCrop {
 
 /// A single image processing command.
 #[non_exhaustive]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Command {
     /// Apply EXIF orientation correction (value 1-8).
     AutoOrient(u8),
@@ -232,10 +232,35 @@ pub enum Command {
     Constrain(Constraint),
     /// Add padding around the image.
     Pad(Padding),
+    /// A dimension-changing geometric effect (arbitrary rotation, etc.)
+    ///
+    /// Processed in sequence order — can appear before or after [`Constrain`].
+    /// Order matters: crop then rotate ≠ rotate then crop.
+    #[cfg(feature = "alloc")]
+    Effect(alloc::boxed::Box<dyn crate::dimension::DimensionEffect>),
+}
+
+/// An effect with concrete dimensions at input and output.
+///
+/// Produced by the planner to tell the execution engine exactly what
+/// to apply and what dimensions to expect at each stage.
+#[cfg(feature = "alloc")]
+#[derive(Clone, Debug)]
+pub struct ResolvedEffect {
+    /// The effect to apply.
+    pub effect: alloc::boxed::Box<dyn crate::dimension::DimensionEffect>,
+    /// Input dimensions for this effect.
+    pub input_dims: Size,
+    /// Output dimensions after this effect.
+    pub output_dims: Size,
+    /// Index in the original command sequence.
+    pub command_index: usize,
+    /// Whether this effect is before the Constrain/resize step.
+    pub before_resize: bool,
 }
 
 /// Result of the first phase of layout planning.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct IdealLayout {
     /// Net orientation to apply.
@@ -249,6 +274,13 @@ pub struct IdealLayout {
     /// If [`Align::Extend`] was used, crop to these dimensions after encoding.
     /// Canvas was extended with replicated edges; this records the real content size.
     pub content_size: Option<Size>,
+    /// Resolved dimension effects in pipeline order.
+    ///
+    /// Empty when no [`Command::Effect`] commands were used.
+    /// The execution engine reads these to insert materialization
+    /// barriers and spatial transforms.
+    #[cfg(feature = "alloc")]
+    pub effects: alloc::vec::Vec<ResolvedEffect>,
 }
 
 /// Explicit padding specification.
@@ -1317,6 +1349,8 @@ impl IdealLayout {
             source_crop: secondary_crop,
             padding: None, // secondary planes don't get padded
             content_size: None,
+            #[cfg(feature = "alloc")]
+            effects: alloc::vec::Vec::new(),
         };
 
         let sec_request = DecoderRequest {
@@ -1416,6 +1450,12 @@ pub fn compute_layout(
                 if padding.is_none() {
                     padding = Some(*p);
                 }
+            }
+            #[cfg(feature = "alloc")]
+            Command::Effect(_) => {
+                // Effects are handled by compute_layout_sequential.
+                // In first-wins mode (compute_layout), effects are ignored
+                // because there's no defined ordering.
             }
         }
     }
@@ -1529,6 +1569,14 @@ pub fn compute_layout_sequential(
                         color: p.color,
                     });
                 }
+            }
+            #[cfg(feature = "alloc")]
+            Command::Effect(_) => {
+                // TODO: track effects in sequence for dimension negotiation.
+                // For now, effects are carried through but not yet applied
+                // to the dimension computation. Full integration requires
+                // forward/inverse passes in compute_layout_sequential.
+                post_ops.push(cmd);
             }
         }
     }
@@ -1665,6 +1713,8 @@ pub fn compute_layout_sequential(
         source_crop: source_crop_in_source,
         padding,
         content_size,
+        #[cfg(feature = "alloc")]
+        effects: alloc::vec::Vec::new(),
     };
 
     let request = DecoderRequest {
@@ -1778,6 +1828,8 @@ fn plan_from_parts(
         source_crop: source_crop_in_source,
         padding,
         content_size,
+        #[cfg(feature = "alloc")]
+        effects: alloc::vec::Vec::new(),
     };
 
     let request = DecoderRequest {

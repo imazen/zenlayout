@@ -21,6 +21,8 @@ whereat::define_at_crate_info!();
 mod float_math;
 
 pub mod constraint;
+#[cfg(feature = "alloc")]
+pub mod dimension;
 pub mod orientation;
 pub mod plan;
 #[cfg(feature = "riapi")]
@@ -35,6 +37,11 @@ pub mod svg;
 // Re-exports: core types from constraint module
 pub use constraint::{
     CanvasColor, Constraint, ConstraintMode, Gravity, Layout, LayoutError, Rect, Size, SourceCrop,
+};
+#[cfg(feature = "alloc")]
+pub use dimension::{
+    DimensionEffect, ExpandEffect, PadEffect, RotateEffect, RotateMode, TrimEffect,
+    expanded_canvas_dims, expanded_canvas_inverse, inscribed_crop_dims, inscribed_crop_inverse,
 };
 pub use orientation::Orientation;
 #[cfg(feature = "alloc")]
