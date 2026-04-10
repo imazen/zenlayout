@@ -14,6 +14,7 @@ use alloc::boxed::Box;
 use core::fmt::Debug;
 
 use crate::constraint::CanvasColor;
+use crate::float_math::F32Ext;
 use crate::plan::RegionCoord;
 
 // ── Trait ──
@@ -100,7 +101,7 @@ impl RotateEffect {
     /// Create a rotation effect from degrees.
     pub fn from_degrees(angle_degrees: f32, mode: RotateMode) -> Self {
         Self {
-            angle_rad: angle_degrees.to_radians(),
+            angle_rad: angle_degrees.to_radians_(),
             mode,
         }
     }
@@ -135,7 +136,7 @@ impl DimensionEffect for RotateEffect {
         let (cx_out, cy_out) = (ow / 2.0, oh / 2.0);
 
         // Rotate point around input center
-        let (sin, cos) = (self.angle_rad.sin(), self.angle_rad.cos());
+        let (sin, cos) = (self.angle_rad.sin_(), self.angle_rad.cos_());
         let dx = x - cx_in;
         let dy = y - cy_in;
         let rx = dx * cos - dy * sin;
@@ -156,7 +157,7 @@ impl DimensionEffect for RotateEffect {
         let (cx_out, cy_out) = (ow / 2.0, oh / 2.0);
 
         // Inverse rotation (negate angle)
-        let (sin, cos) = ((-self.angle_rad).sin(), (-self.angle_rad).cos());
+        let (sin, cos) = ((-self.angle_rad).sin_(), (-self.angle_rad).cos_());
         let dx = x - cx_out;
         let dy = y - cy_out;
         let rx = dx * cos - dy * sin;
@@ -314,11 +315,11 @@ pub fn inscribed_crop_dims(w: u32, h: u32, angle_rad: f32) -> (u32, u32) {
     if w == 0 || h == 0 {
         return (0, 0);
     }
-    let theta = angle_rad.abs() % core::f32::consts::FRAC_PI_2;
+    let theta = angle_rad.abs_() % core::f32::consts::FRAC_PI_2;
     if theta < 1e-7 {
         return (w, h);
     }
-    let (sin, cos) = (theta.sin(), theta.cos());
+    let (sin, cos) = (theta.sin_(), theta.cos_());
     let fw = w as f32;
     let fh = h as f32;
 
@@ -349,8 +350,8 @@ pub fn inscribed_crop_dims(w: u32, h: u32, angle_rad: f32) -> (u32, u32) {
         short / (long * sin + short * cos)
     };
 
-    let crop_w = (fw * scale).floor().max(1.0);
-    let crop_h = (fh * scale).floor().max(1.0);
+    let crop_w = (fw * scale).floor_().max(1.0);
+    let crop_h = (fh * scale).floor_().max(1.0);
     (crop_w as u32, crop_h as u32)
 }
 
@@ -358,16 +359,16 @@ pub fn inscribed_crop_dims(w: u32, h: u32, angle_rad: f32) -> (u32, u32) {
 ///
 /// Returns `(canvas_w, canvas_h)`. Always ≥ `(w, h)` for non-zero angles.
 pub fn expanded_canvas_dims(w: u32, h: u32, angle_rad: f32) -> (u32, u32) {
-    let theta = angle_rad.abs() % core::f32::consts::PI;
+    let theta = angle_rad.abs_() % core::f32::consts::PI;
     if theta < 1e-7 {
         return (w, h);
     }
-    let (sin, cos) = (theta.sin(), theta.cos().abs());
+    let (sin, cos) = (theta.sin_(), theta.cos_().abs_());
     let fw = w as f32;
     let fh = h as f32;
     let canvas_w = fw * cos + fh * sin;
     let canvas_h = fw * sin + fh * cos;
-    (canvas_w.ceil() as u32, canvas_h.ceil() as u32)
+    (canvas_w.ceil_() as u32, canvas_h.ceil_() as u32)
 }
 
 /// Inverse of inscribed crop: what source dimensions produce `(out_w, out_h)`
@@ -376,7 +377,7 @@ pub fn inscribed_crop_inverse(out_w: u32, out_h: u32, angle_rad: f32) -> (u32, u
     if out_w == 0 || out_h == 0 {
         return (0, 0);
     }
-    let theta = angle_rad.abs() % core::f32::consts::FRAC_PI_2;
+    let theta = angle_rad.abs_() % core::f32::consts::FRAC_PI_2;
     if theta < 1e-7 {
         return (out_w, out_h);
     }
@@ -385,7 +386,7 @@ pub fn inscribed_crop_inverse(out_w: u32, out_h: u32, angle_rad: f32) -> (u32, u
     let (cw, _ch) = inscribed_crop_dims(1000, ((1000.0 * fh / fw) as u32).max(1), theta);
     let ratio = cw as f32 / 1000.0;
     if ratio > 0.0 {
-        ((fw / ratio).ceil() as u32, (fh / ratio).ceil() as u32)
+        ((fw / ratio).ceil_() as u32, (fh / ratio).ceil_() as u32)
     } else {
         (out_w, out_h)
     }
@@ -394,16 +395,16 @@ pub fn inscribed_crop_inverse(out_w: u32, out_h: u32, angle_rad: f32) -> (u32, u
 /// Inverse of expanded canvas: what source dimensions produce `(out_w, out_h)`
 /// after rotation and canvas expansion.
 pub fn expanded_canvas_inverse(out_w: u32, out_h: u32, angle_rad: f32) -> (u32, u32) {
-    let theta = angle_rad.abs() % core::f32::consts::PI;
+    let theta = angle_rad.abs_() % core::f32::consts::PI;
     if theta < 1e-7 {
         return (out_w, out_h);
     }
-    let (sin, cos) = (theta.sin(), theta.cos().abs());
+    let (sin, cos) = (theta.sin_(), theta.cos_().abs_());
     // Solve: out_w = src_w * cos + src_h * sin
     //        out_h = src_w * sin + src_h * cos
     // This is a 2×2 linear system.
     let det = cos * cos - sin * sin;
-    if det.abs() < 1e-7 {
+    if det.abs_() < 1e-7 {
         // 45° — degenerate, source is a square
         return (out_w, out_h);
     }
@@ -411,7 +412,7 @@ pub fn expanded_canvas_inverse(out_w: u32, out_h: u32, angle_rad: f32) -> (u32, 
     let fh = out_h as f32;
     let src_w = (fw * cos - fh * sin) / det;
     let src_h = (fh * cos - fw * sin) / det;
-    (src_w.ceil().max(1.0) as u32, src_h.ceil().max(1.0) as u32)
+    (src_w.ceil_().max(1.0) as u32, src_h.ceil_().max(1.0) as u32)
 }
 
 #[cfg(test)]
@@ -425,7 +426,7 @@ mod tests {
 
     #[test]
     fn inscribed_crop_small_angle() {
-        let (w, h) = inscribed_crop_dims(1000, 800, 2.0_f32.to_radians());
+        let (w, h) = inscribed_crop_dims(1000, 800, 2.0_f32.to_radians_());
         // At 2°, loss should be minimal (< 5%)
         assert!(w >= 950, "w={w}");
         assert!(h >= 760, "h={h}");
@@ -434,7 +435,7 @@ mod tests {
 
     #[test]
     fn expanded_canvas_small_angle() {
-        let (w, h) = expanded_canvas_dims(1000, 800, 2.0_f32.to_radians());
+        let (w, h) = expanded_canvas_dims(1000, 800, 2.0_f32.to_radians_());
         // Canvas should grow
         assert!(w > 1000, "w={w}");
         assert!(h > 800, "h={h}");
@@ -453,7 +454,7 @@ mod tests {
     #[test]
     fn inscribed_crop_inverse_roundtrip() {
         let (w, h) = (1000u32, 800u32);
-        let angle = 10.0_f32.to_radians();
+        let angle = 10.0_f32.to_radians_();
         let (cw, ch) = inscribed_crop_dims(w, h, angle);
         let (iw, ih) = inscribed_crop_inverse(cw, ch, angle);
         // Inverse should recover approximately the original
@@ -470,7 +471,7 @@ mod tests {
     #[test]
     fn expanded_canvas_inverse_roundtrip() {
         let (w, h) = (1000u32, 800u32);
-        let angle = 10.0_f32.to_radians();
+        let angle = 10.0_f32.to_radians_();
         let (ew, eh) = expanded_canvas_dims(w, h, angle);
         let (iw, ih) = expanded_canvas_inverse(ew, eh, angle);
         assert!(

@@ -60,6 +60,100 @@ impl F64Ext for f64 {
     }
 }
 
+/// Extension trait providing `sin_()`, `cos_()`, `floor_()`, `ceil_()`
+/// and `to_radians_()` on `f32`.
+///
+/// When `std` is available, these delegate to the standard library.
+/// Without `std`, pure-Rust approximations are used.
+pub(crate) trait F32Ext {
+    fn sin_(self) -> f32;
+    fn cos_(self) -> f32;
+    fn floor_(self) -> f32;
+    fn ceil_(self) -> f32;
+    fn abs_(self) -> f32;
+    fn to_radians_(self) -> f32;
+}
+
+#[cfg(feature = "std")]
+impl F32Ext for f32 {
+    #[inline(always)]
+    fn sin_(self) -> f32 {
+        self.sin()
+    }
+    #[inline(always)]
+    fn cos_(self) -> f32 {
+        self.cos()
+    }
+    #[inline(always)]
+    fn floor_(self) -> f32 {
+        self.floor()
+    }
+    #[inline(always)]
+    fn ceil_(self) -> f32 {
+        self.ceil()
+    }
+    #[inline(always)]
+    fn abs_(self) -> f32 {
+        self.abs()
+    }
+    #[inline(always)]
+    fn to_radians_(self) -> f32 {
+        self.to_radians()
+    }
+}
+
+#[cfg(not(feature = "std"))]
+impl F32Ext for f32 {
+    #[inline(always)]
+    fn sin_(self) -> f32 {
+        // Bhaskara I approximation, good enough for dimension planning.
+        // Normalize to [0, 2π]
+        let mut x = self % (2.0 * core::f32::consts::PI);
+        if x < 0.0 {
+            x += 2.0 * core::f32::consts::PI;
+        }
+        let negate = x > core::f32::consts::PI;
+        if negate {
+            x -= core::f32::consts::PI;
+        }
+        // Bhaskara: sin(x) ≈ 16x(π-x) / (5π² - 4x(π-x))
+        let pi = core::f32::consts::PI;
+        let num = 16.0 * x * (pi - x);
+        let den = 5.0 * pi * pi - 4.0 * x * (pi - x);
+        let result = num / den;
+        if negate { -result } else { result }
+    }
+
+    #[inline(always)]
+    fn cos_(self) -> f32 {
+        (self + core::f32::consts::FRAC_PI_2).sin_()
+    }
+
+    #[inline(always)]
+    fn floor_(self) -> f32 {
+        let i = self as i32;
+        let fi = i as f32;
+        if self < fi { fi - 1.0 } else { fi }
+    }
+
+    #[inline(always)]
+    fn ceil_(self) -> f32 {
+        let i = self as i32;
+        let fi = i as f32;
+        if self > fi { fi + 1.0 } else { fi }
+    }
+
+    #[inline(always)]
+    fn abs_(self) -> f32 {
+        if self < 0.0 { -self } else { self }
+    }
+
+    #[inline(always)]
+    fn to_radians_(self) -> f32 {
+        self * (core::f32::consts::PI / 180.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::F64Ext;
