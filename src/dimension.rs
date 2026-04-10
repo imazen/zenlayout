@@ -490,7 +490,7 @@ mod tests {
         let (w, h) = effect.forward(1000, 800);
         assert!(w < 1000);
         assert!(h < 800);
-        let (iw, ih) = effect.inverse(w, h).unwrap();
+        let (iw, _ih) = effect.inverse(w, h).unwrap();
         assert!((iw as i32 - 1000).unsigned_abs() <= 10, "iw={iw}");
     }
 
