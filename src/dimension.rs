@@ -32,6 +32,31 @@ pub trait DimensionEffect: Debug + Send + Sync {
     /// whose output depends on pixel analysis).
     fn inverse(&self, w: u32, h: u32) -> Option<(u32, u32)>;
 
+    /// Map a point from input space to output space.
+    ///
+    /// Coordinates are fractional (0.0–1.0 = within the image).
+    /// Values outside 0.0–1.0 are valid (padding regions, etc.).
+    ///
+    /// Default implementation scales linearly by the dimension ratio.
+    fn forward_point(&self, x: f32, y: f32, in_w: u32, in_h: u32) -> (f32, f32) {
+        let (out_w, out_h) = self.forward(in_w, in_h);
+        (
+            x * out_w as f32 / in_w.max(1) as f32,
+            y * out_h as f32 / in_h.max(1) as f32,
+        )
+    }
+
+    /// Map a point from output space back to input space.
+    ///
+    /// Default implementation scales linearly by the inverse dimension ratio.
+    fn inverse_point(&self, x: f32, y: f32, out_w: u32, out_h: u32) -> Option<(f32, f32)> {
+        let (in_w, in_h) = self.inverse(out_w, out_h)?;
+        Some((
+            x * in_w as f32 / out_w.max(1) as f32,
+            y * in_h as f32 / out_h.max(1) as f32,
+        ))
+    }
+
     /// Clone into a boxed trait object.
     fn clone_boxed(&self) -> Box<dyn DimensionEffect>;
 }
@@ -98,6 +123,48 @@ impl DimensionEffect for RotateEffect {
         })
     }
 
+    fn forward_point(&self, x: f32, y: f32, in_w: u32, in_h: u32) -> (f32, f32) {
+        let (out_w, out_h) = self.forward(in_w, in_h);
+        let fw = in_w as f32;
+        let fh = in_h as f32;
+        let ow = out_w as f32;
+        let oh = out_h as f32;
+
+        // Center of input and output
+        let (cx_in, cy_in) = (fw / 2.0, fh / 2.0);
+        let (cx_out, cy_out) = (ow / 2.0, oh / 2.0);
+
+        // Rotate point around input center
+        let (sin, cos) = (self.angle_rad.sin(), self.angle_rad.cos());
+        let dx = x - cx_in;
+        let dy = y - cy_in;
+        let rx = dx * cos - dy * sin;
+        let ry = dx * sin + dy * cos;
+
+        // Translate to output center
+        (rx + cx_out, ry + cy_out)
+    }
+
+    fn inverse_point(&self, x: f32, y: f32, out_w: u32, out_h: u32) -> Option<(f32, f32)> {
+        let (in_w, in_h) = self.inverse(out_w, out_h)?;
+        let fw = in_w as f32;
+        let fh = in_h as f32;
+        let ow = out_w as f32;
+        let oh = out_h as f32;
+
+        let (cx_in, cy_in) = (fw / 2.0, fh / 2.0);
+        let (cx_out, cy_out) = (ow / 2.0, oh / 2.0);
+
+        // Inverse rotation (negate angle)
+        let (sin, cos) = ((-self.angle_rad).sin(), (-self.angle_rad).cos());
+        let dx = x - cx_out;
+        let dy = y - cy_out;
+        let rx = dx * cos - dy * sin;
+        let ry = dx * sin + dy * cos;
+
+        Some((rx + cx_in, ry + cy_in))
+    }
+
     fn clone_boxed(&self) -> Box<dyn DimensionEffect> {
         Box::new(*self)
     }
@@ -158,6 +225,20 @@ impl DimensionEffect for PadEffect {
         ))
     }
 
+    fn forward_point(&self, x: f32, y: f32, in_w: u32, in_h: u32) -> (f32, f32) {
+        // Content shifts right/down by left/top padding
+        let left = self.left.resolve(in_w).max(0) as f32;
+        let top = self.top.resolve(in_h).max(0) as f32;
+        (x + left, y + top)
+    }
+
+    fn inverse_point(&self, x: f32, y: f32, out_w: u32, out_h: u32) -> Option<(f32, f32)> {
+        let (in_w, in_h) = self.inverse(out_w, out_h)?;
+        let left = self.left.resolve(in_w).max(0) as f32;
+        let top = self.top.resolve(in_h).max(0) as f32;
+        Some((x - left, y - top))
+    }
+
     fn clone_boxed(&self) -> Box<dyn DimensionEffect> {
         Box::new(*self)
     }
@@ -182,6 +263,14 @@ impl DimensionEffect for ExpandEffect {
             w.saturating_sub(self.left + self.right),
             h.saturating_sub(self.top + self.bottom),
         ))
+    }
+
+    fn forward_point(&self, x: f32, y: f32, _in_w: u32, _in_h: u32) -> (f32, f32) {
+        (x + self.left as f32, y + self.top as f32)
+    }
+
+    fn inverse_point(&self, x: f32, y: f32, _out_w: u32, _out_h: u32) -> Option<(f32, f32)> {
+        Some((x - self.left as f32, y - self.top as f32))
     }
 
     fn clone_boxed(&self) -> Box<dyn DimensionEffect> {
@@ -453,5 +542,71 @@ mod tests {
         };
         assert_eq!(effect.forward(100, 100), (120, 140));
         assert_eq!(effect.inverse(120, 140), Some((100, 100)));
+    }
+
+    // ── Point mapping tests ──
+
+    fn approx_eq(a: (f32, f32), b: (f32, f32), tol: f32) -> bool {
+        (a.0 - b.0).abs() < tol && (a.1 - b.1).abs() < tol
+    }
+
+    #[test]
+    fn rotate_point_center_stays() {
+        // Center of image should stay at center after rotation
+        let effect = RotateEffect::from_degrees(30.0, RotateMode::InscribedCrop);
+        let (out_w, out_h) = effect.forward(1000, 800);
+        let p = effect.forward_point(500.0, 400.0, 1000, 800);
+        assert!(
+            approx_eq(p, (out_w as f32 / 2.0, out_h as f32 / 2.0), 1.0),
+            "center mapped to {p:?}, expected ~({}, {})",
+            out_w as f32 / 2.0,
+            out_h as f32 / 2.0
+        );
+    }
+
+    #[test]
+    fn rotate_point_roundtrip() {
+        let effect = RotateEffect::from_degrees(
+            15.0,
+            RotateMode::Expand {
+                color: CanvasColor::Transparent,
+            },
+        );
+        let (out_w, out_h) = effect.forward(1000, 800);
+        let p = effect.forward_point(200.0, 300.0, 1000, 800);
+        let back = effect.inverse_point(p.0, p.1, out_w, out_h).unwrap();
+        assert!(
+            approx_eq(back, (200.0, 300.0), 2.0),
+            "roundtrip: {back:?} expected ~(200, 300)"
+        );
+    }
+
+    #[test]
+    fn pad_point_shifts_by_padding() {
+        let effect = PadEffect::pixels(20, CanvasColor::Transparent);
+        let p = effect.forward_point(100.0, 50.0, 1000, 800);
+        assert_eq!(p, (120.0, 70.0)); // shifted by left=20, top=20
+    }
+
+    #[test]
+    fn pad_point_inverse() {
+        let effect = PadEffect::pixels(20, CanvasColor::Transparent);
+        let back = effect.inverse_point(120.0, 70.0, 1040, 840).unwrap();
+        assert!(approx_eq(back, (100.0, 50.0), 0.1), "back={back:?}");
+    }
+
+    #[test]
+    fn expand_point_shifts() {
+        let effect = ExpandEffect {
+            left: 10,
+            top: 20,
+            right: 10,
+            bottom: 20,
+        };
+        assert_eq!(effect.forward_point(50.0, 50.0, 100, 100), (60.0, 70.0));
+        assert_eq!(
+            effect.inverse_point(60.0, 70.0, 120, 140),
+            Some((50.0, 50.0))
+        );
     }
 }
