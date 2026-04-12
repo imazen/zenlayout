@@ -27,11 +27,17 @@ use crate::plan::RegionCoord;
 /// dimensions through each step and adjusts the resize target accordingly.
 pub trait DimensionEffect: Debug + Send + Sync {
     /// Output dimensions given input dimensions.
-    fn forward(&self, w: u32, h: u32) -> (u32, u32);
+    ///
+    /// Returns `None` for content-adaptive effects whose output depends on
+    /// pixel analysis (e.g. auto-trim, auto-deskew). The planner treats
+    /// `None` as an **analysis barrier** — it cannot plan through the effect
+    /// without runtime data from an `Analyze` node.
+    fn forward(&self, w: u32, h: u32) -> Option<(u32, u32)>;
 
     /// Required input dimensions for desired output.
-    /// Returns `None` if non-invertible (content-adaptive operations
-    /// whose output depends on pixel analysis).
+    ///
+    /// Returns `None` if non-invertible (content-adaptive operations) or
+    /// if the inverse is ambiguous (e.g. expanded canvas at exactly 45°).
     fn inverse(&self, w: u32, h: u32) -> Option<(u32, u32)>;
 
     /// Map a point from input space to output space.
@@ -40,13 +46,14 @@ pub trait DimensionEffect: Debug + Send + Sync {
     /// input. `in_w` and `in_h` are the input dimensions (needed because
     /// some effects centre their transform on the image).
     ///
+    /// Returns `None` for content-adaptive effects.
     /// Default implementation scales linearly by the dimension ratio.
-    fn forward_point(&self, x: f32, y: f32, in_w: u32, in_h: u32) -> (f32, f32) {
-        let (out_w, out_h) = self.forward(in_w, in_h);
-        (
+    fn forward_point(&self, x: f32, y: f32, in_w: u32, in_h: u32) -> Option<(f32, f32)> {
+        let (out_w, out_h) = self.forward(in_w, in_h)?;
+        Some((
             x * out_w as f32 / in_w.max(1) as f32,
             y * out_h as f32 / in_h.max(1) as f32,
-        )
+        ))
     }
 
     /// Map a point from output space back to input space.
@@ -56,10 +63,10 @@ pub trait DimensionEffect: Debug + Send + Sync {
     /// `inverse()` (which is ambiguous for some effects — e.g. expanded
     /// canvas at exactly 45°).
     ///
-    /// Returns `None` only for non-invertible (content-adaptive) effects.
+    /// Returns `None` for non-invertible (content-adaptive) effects.
     /// Default implementation scales linearly by the inverse dimension ratio.
     fn inverse_point(&self, x: f32, y: f32, in_w: u32, in_h: u32) -> Option<(f32, f32)> {
-        let (out_w, out_h) = self.forward(in_w, in_h);
+        let (out_w, out_h) = self.forward(in_w, in_h)?;
         Some((
             x * in_w as f32 / out_w.max(1) as f32,
             y * in_h as f32 / out_h.max(1) as f32,
@@ -116,12 +123,12 @@ impl RotateEffect {
 }
 
 impl DimensionEffect for RotateEffect {
-    fn forward(&self, w: u32, h: u32) -> (u32, u32) {
-        match self.mode {
+    fn forward(&self, w: u32, h: u32) -> Option<(u32, u32)> {
+        Some(match self.mode {
             RotateMode::InscribedCrop => inscribed_crop_dims(w, h, self.angle_rad),
             RotateMode::Expand { .. } => expanded_canvas_dims(w, h, self.angle_rad),
             RotateMode::CropToOriginal => (w, h),
-        }
+        })
     }
 
     fn inverse(&self, w: u32, h: u32) -> Option<(u32, u32)> {
@@ -132,8 +139,8 @@ impl DimensionEffect for RotateEffect {
         })
     }
 
-    fn forward_point(&self, x: f32, y: f32, in_w: u32, in_h: u32) -> (f32, f32) {
-        let (out_w, out_h) = self.forward(in_w, in_h);
+    fn forward_point(&self, x: f32, y: f32, in_w: u32, in_h: u32) -> Option<(f32, f32)> {
+        let (out_w, out_h) = self.forward(in_w, in_h)?;
         let fw = in_w as f32;
         let fh = in_h as f32;
         let ow = out_w as f32;
@@ -151,11 +158,11 @@ impl DimensionEffect for RotateEffect {
         let ry = dx * sin + dy * cos;
 
         // Translate to output center
-        (rx + cx_out, ry + cy_out)
+        Some((rx + cx_out, ry + cy_out))
     }
 
     fn inverse_point(&self, x: f32, y: f32, in_w: u32, in_h: u32) -> Option<(f32, f32)> {
-        let (out_w, out_h) = self.forward(in_w, in_h);
+        let (out_w, out_h) = self.forward(in_w, in_h)?;
         let fw = in_w as f32;
         let fh = in_h as f32;
         let ow = out_w as f32;
@@ -215,12 +222,12 @@ impl PadEffect {
 }
 
 impl DimensionEffect for PadEffect {
-    fn forward(&self, w: u32, h: u32) -> (u32, u32) {
+    fn forward(&self, w: u32, h: u32) -> Option<(u32, u32)> {
         let left = self.left.resolve(w).max(0) as u32;
         let right = self.right.resolve(w).max(0) as u32;
         let top = self.top.resolve(h).max(0) as u32;
         let bottom = self.bottom.resolve(h).max(0) as u32;
-        (w + left + right, h + top + bottom)
+        Some((w + left + right, h + top + bottom))
     }
 
     fn inverse(&self, w: u32, h: u32) -> Option<(u32, u32)> {
@@ -242,15 +249,13 @@ impl DimensionEffect for PadEffect {
         Some((in_w, in_h))
     }
 
-    fn forward_point(&self, x: f32, y: f32, in_w: u32, in_h: u32) -> (f32, f32) {
-        // Content shifts right/down by left/top padding (resolved against input dims).
+    fn forward_point(&self, x: f32, y: f32, in_w: u32, in_h: u32) -> Option<(f32, f32)> {
         let left = self.left.resolve(in_w).max(0) as f32;
         let top = self.top.resolve(in_h).max(0) as f32;
-        (x + left, y + top)
+        Some((x + left, y + top))
     }
 
     fn inverse_point(&self, x: f32, y: f32, in_w: u32, in_h: u32) -> Option<(f32, f32)> {
-        // Input dims are given — reverse the same shift that forward_point applied.
         let left = self.left.resolve(in_w).max(0) as f32;
         let top = self.top.resolve(in_h).max(0) as f32;
         Some((x - left, y - top))
@@ -271,8 +276,8 @@ pub struct ExpandEffect {
 }
 
 impl DimensionEffect for ExpandEffect {
-    fn forward(&self, w: u32, h: u32) -> (u32, u32) {
-        (w + self.left + self.right, h + self.top + self.bottom)
+    fn forward(&self, w: u32, h: u32) -> Option<(u32, u32)> {
+        Some((w + self.left + self.right, h + self.top + self.bottom))
     }
 
     fn inverse(&self, w: u32, h: u32) -> Option<(u32, u32)> {
@@ -282,8 +287,8 @@ impl DimensionEffect for ExpandEffect {
         ))
     }
 
-    fn forward_point(&self, x: f32, y: f32, _in_w: u32, _in_h: u32) -> (f32, f32) {
-        (x + self.left as f32, y + self.top as f32)
+    fn forward_point(&self, x: f32, y: f32, _in_w: u32, _in_h: u32) -> Option<(f32, f32)> {
+        Some((x + self.left as f32, y + self.top as f32))
     }
 
     fn inverse_point(&self, x: f32, y: f32, _in_w: u32, _in_h: u32) -> Option<(f32, f32)> {
@@ -295,25 +300,45 @@ impl DimensionEffect for ExpandEffect {
     }
 }
 
-/// Content-aware trim (non-invertible).
+/// Content-aware trim (**analysis barrier**).
 ///
-/// Actual dimensions are determined at runtime by pixel analysis.
-/// The `estimated_margin_percent` is a planning hint — the planner
-/// estimates output as `(1 - 2*margin) * input` per axis.
+/// Actual dimensions are determined at runtime by pixel analysis — the
+/// planner cannot predict output size. Both `forward()` and `inverse()`
+/// return `None`, signalling that the execution engine must resolve
+/// dimensions via an `Analyze` node before planning can continue.
+///
+/// `estimated_margin_percent` is a **hint** for UI previews and fallback
+/// estimates. It is NOT used by `forward()` — callers who want an
+/// approximate preview can compute `(1 - 2*margin) * dim` themselves,
+/// but the trait refuses to disguise it as exact.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct TrimEffect {
     /// Expected margin to trim, as a fraction (0.05 = ~5% per side).
+    /// This is a hint for UI preview — not used by the trait methods.
     pub estimated_margin_percent: f32,
 }
 
+impl TrimEffect {
+    /// Estimated output dimensions (for UI previews only).
+    ///
+    /// This is NOT `forward()` — it's an explicit "I know this is a guess"
+    /// API that callers opt into. The trait's `forward()` returns `None`.
+    pub fn estimated_dims(&self, w: u32, h: u32) -> (u32, u32) {
+        let scale = (1.0 - 2.0 * self.estimated_margin_percent).max(0.0);
+        (
+            (w as f32 * scale).round().max(1.0) as u32,
+            (h as f32 * scale).round().max(1.0) as u32,
+        )
+    }
+}
+
 impl DimensionEffect for TrimEffect {
-    fn forward(&self, w: u32, h: u32) -> (u32, u32) {
-        let scale = 1.0 - 2.0 * self.estimated_margin_percent;
-        ((w as f32 * scale) as u32, (h as f32 * scale) as u32)
+    fn forward(&self, _w: u32, _h: u32) -> Option<(u32, u32)> {
+        None // Analysis barrier: actual trim depends on pixel content.
     }
 
     fn inverse(&self, _w: u32, _h: u32) -> Option<(u32, u32)> {
-        None // Non-invertible: actual trim depends on content
+        None // Non-invertible: actual trim depends on content.
     }
 
     fn clone_boxed(&self) -> Box<dyn DimensionEffect> {
@@ -650,12 +675,12 @@ mod tests {
     #[test]
     fn rotate_effect_inscribed_crop() {
         let effect = RotateEffect::from_degrees(15.0, RotateMode::InscribedCrop);
-        let (w, h) = effect.forward(1000, 800);
+        let (w, h) = effect.forward(1000, 800).unwrap();
         assert!(w < 1000);
         assert!(h < 800);
         let (iw, ih) = effect.inverse(w, h).unwrap();
         // forward(inverse(out)) must equal out exactly
-        assert_eq!(effect.forward(iw, ih), (w, h));
+        assert_eq!(effect.forward(iw, ih).unwrap(), (w, h));
     }
 
     #[test]
@@ -666,7 +691,7 @@ mod tests {
                 color: CanvasColor::Transparent,
             },
         );
-        let (w, h) = effect.forward(1000, 800);
+        let (w, h) = effect.forward(1000, 800).unwrap();
         assert!(w > 1000, "w={w}");
         assert!(h > 800, "h={h}");
     }
@@ -674,7 +699,7 @@ mod tests {
     #[test]
     fn pad_effect_percent() {
         let effect = PadEffect::percent(0.1, CanvasColor::Transparent);
-        let (w, h) = effect.forward(1000, 800);
+        let (w, h) = effect.forward(1000, 800).unwrap();
         // 10% padding on each side: 1000 + 100 + 100 = 1200
         assert_eq!(w, 1200);
         assert_eq!(h, 960);
@@ -683,18 +708,25 @@ mod tests {
     #[test]
     fn pad_effect_inverse() {
         let effect = PadEffect::pixels(20, CanvasColor::Transparent);
-        let (w, h) = effect.forward(1000, 800);
+        let (w, h) = effect.forward(1000, 800).unwrap();
         assert_eq!((w, h), (1040, 840));
         let (iw, ih) = effect.inverse(1040, 840).unwrap();
         assert_eq!((iw, ih), (1000, 800));
     }
 
     #[test]
-    fn trim_non_invertible() {
+    fn trim_is_analysis_barrier() {
         let effect = TrimEffect {
             estimated_margin_percent: 0.05,
         };
+        // TrimEffect refuses to give concrete dimensions (analysis barrier).
+        assert!(effect.forward(1000, 800).is_none());
         assert!(effect.inverse(900, 720).is_none());
+        assert!(effect.forward_point(100.0, 100.0, 1000, 800).is_none());
+        assert!(effect.inverse_point(100.0, 100.0, 1000, 800).is_none());
+        // Estimated dims available via explicit opt-in method.
+        let (ew, eh) = effect.estimated_dims(1000, 800);
+        assert_eq!((ew, eh), (900, 720));
     }
 
     #[test]
@@ -705,7 +737,7 @@ mod tests {
             right: 10,
             bottom: 20,
         };
-        assert_eq!(effect.forward(100, 100), (120, 140));
+        assert_eq!(effect.forward(100, 100), Some((120, 140)));
         assert_eq!(effect.inverse(120, 140), Some((100, 100)));
     }
 
@@ -719,8 +751,8 @@ mod tests {
     fn rotate_point_center_stays() {
         // Center of image should stay at center after rotation
         let effect = RotateEffect::from_degrees(30.0, RotateMode::InscribedCrop);
-        let (out_w, out_h) = effect.forward(1000, 800);
-        let p = effect.forward_point(500.0, 400.0, 1000, 800);
+        let (out_w, out_h) = effect.forward(1000, 800).unwrap();
+        let p = effect.forward_point(500.0, 400.0, 1000, 800).unwrap();
         assert!(
             approx_eq(p, (out_w as f32 / 2.0, out_h as f32 / 2.0), 1.0),
             "center mapped to {p:?}, expected ~({}, {})",
@@ -737,7 +769,7 @@ mod tests {
                 color: CanvasColor::Transparent,
             },
         );
-        let p = effect.forward_point(200.0, 300.0, 1000, 800);
+        let p = effect.forward_point(200.0, 300.0, 1000, 800).unwrap();
         let back = effect.inverse_point(p.0, p.1, 1000, 800).unwrap();
         assert!(
             approx_eq(back, (200.0, 300.0), 1e-3),
@@ -748,7 +780,7 @@ mod tests {
     #[test]
     fn pad_point_shifts_by_padding() {
         let effect = PadEffect::pixels(20, CanvasColor::Transparent);
-        let p = effect.forward_point(100.0, 50.0, 1000, 800);
+        let p = effect.forward_point(100.0, 50.0, 1000, 800).unwrap();
         assert_eq!(p, (120.0, 70.0)); // shifted by left=20, top=20
     }
 
@@ -767,7 +799,10 @@ mod tests {
             right: 10,
             bottom: 20,
         };
-        assert_eq!(effect.forward_point(50.0, 50.0, 100, 100), (60.0, 70.0));
+        assert_eq!(
+            effect.forward_point(50.0, 50.0, 100, 100),
+            Some((60.0, 70.0))
+        );
         assert_eq!(
             effect.inverse_point(60.0, 70.0, 100, 100),
             Some((50.0, 50.0))
@@ -937,12 +972,12 @@ mod tests {
                         color: CanvasColor::Transparent,
                     },
                 );
-                let (ow, oh) = effect.forward(w, h);
+                let (ow, oh) = effect.forward(w, h).unwrap();
                 if ow == 0 || oh == 0 {
                     continue;
                 }
                 for p in red_pixel_points(w, h) {
-                    let q = effect.forward_point(p.0, p.1, w, h);
+                    let q = effect.forward_point(p.0, p.1, w, h).unwrap();
                     let back = effect
                         .inverse_point(q.0, q.1, w, h)
                         .expect("expand inverse exists");
@@ -966,12 +1001,12 @@ mod tests {
         for &(w, h) in SWEEP_DIMS.iter().filter(|(w, h)| *w >= 4 && *h >= 4) {
             for &deg in SWEEP_ANGLES_DEG {
                 let effect = RotateEffect::from_degrees(deg, RotateMode::InscribedCrop);
-                let (ow, oh) = effect.forward(w, h);
+                let (ow, oh) = effect.forward(w, h).unwrap();
                 if ow == 0 || oh == 0 {
                     continue;
                 }
                 for p in red_pixel_points(w, h) {
-                    let q = effect.forward_point(p.0, p.1, w, h);
+                    let q = effect.forward_point(p.0, p.1, w, h).unwrap();
                     let back = effect.inverse_point(q.0, q.1, w, h).unwrap();
                     let d = dist(back, p);
                     assert!(
@@ -990,7 +1025,7 @@ mod tests {
         for &(w, h) in SWEEP_DIMS.iter().filter(|(w, h)| *w >= 4 && *h >= 4) {
             for &deg in SWEEP_ANGLES_DEG {
                 let effect = RotateEffect::from_degrees(deg, RotateMode::InscribedCrop);
-                let (ow, oh) = effect.forward(w, h);
+                let (ow, oh) = effect.forward(w, h).unwrap();
                 if ow == 0 || oh == 0 {
                     continue;
                 }
@@ -998,7 +1033,7 @@ mod tests {
                 let cy_in = h as f32 / 2.0;
                 let cx_out = ow as f32 / 2.0;
                 let cy_out = oh as f32 / 2.0;
-                let mapped = effect.forward_point(cx_in, cy_in, w, h);
+                let mapped = effect.forward_point(cx_in, cy_in, w, h).unwrap();
                 let d = dist(mapped, (cx_out, cy_out));
                 assert!(
                     d < 1e-4,
@@ -1039,9 +1074,9 @@ mod tests {
         ];
         for effect in &effects {
             for &(w, h) in SWEEP_DIMS.iter().filter(|(w, h)| *w >= 4 && *h >= 4) {
-                let _ = effect.forward(w, h);
+                let _ = effect.forward(w, h).unwrap();
                 for p in red_pixel_points(w, h) {
-                    let q = effect.forward_point(p.0, p.1, w, h);
+                    let q = effect.forward_point(p.0, p.1, w, h).unwrap();
                     let back = effect
                         .inverse_point(q.0, q.1, w, h)
                         .expect("pad inverse exists");
@@ -1080,14 +1115,14 @@ mod tests {
         ];
         for effect in &effects {
             for &(w, h) in SWEEP_DIMS {
-                let (ow, oh) = effect.forward(w, h);
+                let (ow, oh) = effect.forward(w, h).unwrap();
                 // ExpandEffect::forward/inverse are pure integer math — exact.
                 if w + effect.left + effect.right == ow && h + effect.top + effect.bottom == oh {
                     let (iw, ih) = effect.inverse(ow, oh).unwrap();
                     assert_eq!((iw, ih), (w, h));
                 }
                 for p in red_pixel_points(w, h) {
-                    let q = effect.forward_point(p.0, p.1, w, h);
+                    let q = effect.forward_point(p.0, p.1, w, h).unwrap();
                     let back = effect.inverse_point(q.0, q.1, w, h).unwrap();
                     // ExpandEffect shifts by integer amounts — roundtrip is
                     // exact in the math, but f32 precision on large coords can
