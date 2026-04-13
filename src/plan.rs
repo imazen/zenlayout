@@ -1003,11 +1003,7 @@ impl Pipeline {
     ///
     /// The position of this call in the builder chain determines whether the
     /// rotation is applied before or after the resize constraint.
-    pub fn rotate_angle(
-        mut self,
-        degrees: f32,
-        mode: crate::dimension::RotateMode,
-    ) -> Self {
+    pub fn rotate_angle(mut self, degrees: f32, mode: crate::dimension::RotateMode) -> Self {
         // Normalize to [0, 360)
         let norm = ((degrees % 360.0) + 360.0) % 360.0;
         let cardinal = if (norm - 0.0).abs() < 0.01 || (norm - 360.0).abs() < 0.01 {
@@ -1026,11 +1022,9 @@ impl Pipeline {
             Some(Some(r)) => self.commands.push(Command::Rotate(r)),
             Some(None) => {} // 0° — no-op
             None => {
-                self.commands.push(Command::Effect(
-                    alloc::boxed::Box::new(crate::dimension::RotateEffect::from_degrees(
-                        degrees, mode,
-                    )),
-                ));
+                self.commands.push(Command::Effect(alloc::boxed::Box::new(
+                    crate::dimension::RotateEffect::from_degrees(degrees, mode),
+                )));
             }
         }
         self
