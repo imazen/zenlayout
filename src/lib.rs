@@ -37,8 +37,9 @@ pub use constraint::{
     CanvasColor, Constraint, ConstraintMode, Gravity, Layout, LayoutError, Rect, Size, SourceCrop,
 };
 pub use dimension::{
-    DimensionEffect, ExpandEffect, PadEffect, RotateEffect, RotateMode, TrimEffect,
-    expanded_canvas_dims, expanded_canvas_inverse, inscribed_crop_dims, inscribed_crop_inverse,
+    DimensionEffect, ExpandEffect, PadEffect, ResolutionPolicy, RotateEffect, RotateMode,
+    TrimEffect, WarpEffect, expanded_canvas_dims, expanded_canvas_inverse, inscribed_crop_dims,
+    inscribed_crop_inverse, warp_output_dims,
 };
 pub use orientation::Orientation;
 pub use plan::{
