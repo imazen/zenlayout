@@ -5,10 +5,10 @@
 //! for spatial transforms before and after resize.
 //!
 //! zenlayout provides built-in implementations for common effects
-//! ([`RotateEffect`], [`PadEffect`], [`ExpandEffect`], [`TrimEffect`]).
-//! Downstream crates can implement the trait for new operations
-//! (perspective correction, lens distortion, etc.) without modifying
-//! zenlayout.
+//! ([`RotateEffect`], [`PadEffect`], [`ExpandEffect`], [`TrimEffect`],
+//! [`WarpEffect`]). Downstream crates can implement the trait for new
+//! operations (lens distortion, content-aware resize, etc.) without
+//! modifying zenlayout.
 
 use alloc::boxed::Box;
 use core::fmt::Debug;
@@ -346,7 +346,289 @@ impl DimensionEffect for TrimEffect {
     }
 }
 
-// ── Pure math functions ──
+// ── Warp / projective effects ──
+
+/// How to choose output dimensions for a non-uniform spatial transform.
+///
+/// When a projective or affine transform has varying local scale (e.g.
+/// perspective correction where the near edge has 2× the source pixels
+/// of the far edge), this policy determines the output resolution.
+#[non_exhaustive]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum ResolutionPolicy {
+    /// Match the narrowest (lowest-density) edge: output resolution ensures
+    /// no region is upsampled. The wide edge is downsampled. Produces the
+    /// sharpest result at the cost of discarding source detail from the
+    /// high-density region.
+    ///
+    /// Use for: document OCR, archival scans, text-heavy images.
+    MatchNarrow,
+    /// Match the widest (highest-density) edge: output resolution preserves
+    /// all source detail. The narrow edge is upsampled (interpolated).
+    /// Produces the largest output.
+    ///
+    /// Use for: photo editing where no source pixel should be discarded.
+    MatchWide,
+    /// Geometric mean of edge scales — a balanced middle ground.
+    ///
+    /// Use for: general-purpose perspective correction.
+    MatchArea,
+    /// Keep the same dimensions as input. Current zenfilters behavior.
+    /// Ignores the transform's non-uniform scale.
+    PreserveInput,
+    /// Caller-specified exact dimensions.
+    Custom(u32, u32),
+}
+
+/// Spatial warp via 3×3 projective matrix with resolution policy.
+///
+/// The matrix maps **output** coordinates to **source** coordinates (inverse
+/// mapping), matching the convention used by zenfilters' `Warp::projective()`.
+///
+/// Unlike [`RotateEffect`] (which handles content coverage — inscribed crop
+/// vs expand), `WarpEffect` handles **resolution**: when a transform has
+/// non-uniform local scale (perspective, lens distortion), the policy
+/// determines how to size the output.
+///
+/// # Matrix convention
+///
+/// ```text
+/// [sx·w]   [m[0] m[1] m[2]]   [x']
+/// [sy·w] = [m[3] m[4] m[5]] × [y']
+/// [  w ]   [m[6] m[7] m[8]]   [ 1]
+///
+/// source_x = sx / w,  source_y = sy / w
+/// ```
+///
+/// For pure affine transforms, `m[6] = m[7] = 0, m[8] = 1`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WarpEffect {
+    /// 3×3 transform matrix (row-major), output → source.
+    pub matrix: [f64; 9],
+    /// Resolution policy for non-uniform scale.
+    pub policy: ResolutionPolicy,
+}
+
+impl WarpEffect {
+    /// Create from a 3×3 projective matrix and resolution policy.
+    pub fn new(matrix: [f32; 9], policy: ResolutionPolicy) -> Self {
+        Self {
+            matrix: matrix.map(|v| v as f64),
+            policy,
+        }
+    }
+
+    /// Create from an f64 matrix.
+    pub fn new_f64(matrix: [f64; 9], policy: ResolutionPolicy) -> Self {
+        Self { matrix, policy }
+    }
+}
+
+impl DimensionEffect for WarpEffect {
+    fn forward(&self, w: u32, h: u32) -> Option<(u32, u32)> {
+        Some(warp_output_dims(w, h, &self.matrix, self.policy))
+    }
+
+    fn inverse(&self, out_w: u32, out_h: u32) -> Option<(u32, u32)> {
+        warp_inverse_dims(out_w, out_h, &self.matrix, self.policy)
+    }
+
+    fn forward_point(&self, x: f32, y: f32, in_w: u32, in_h: u32) -> Option<(f32, f32)> {
+        let (out_w, out_h) = self.forward(in_w, in_h)?;
+        // Forward point mapping: source → output via M⁻¹.
+        // M maps output→source, so M⁻¹ maps source→output.
+        // If output dims differ from input, scale the output coordinates.
+        let inv = invert_3x3(&self.matrix)?;
+        let (ox, oy) = apply_projective(&inv, x as f64, y as f64);
+        // The matrix was built for output space (0..in_w, 0..in_h).
+        // Scale to actual output dims.
+        Some((
+            (ox * out_w as f64 / in_w.max(1) as f64) as f32,
+            (oy * out_h as f64 / in_h.max(1) as f64) as f32,
+        ))
+    }
+
+    fn inverse_point(&self, x: f32, y: f32, in_w: u32, in_h: u32) -> Option<(f32, f32)> {
+        let (out_w, out_h) = self.forward(in_w, in_h)?;
+        // Inverse point: output → source via M.
+        // Scale from actual output coords to matrix output space first.
+        let mx = x as f64 * in_w as f64 / out_w.max(1) as f64;
+        let my = y as f64 * in_h as f64 / out_h.max(1) as f64;
+        let (sx, sy) = apply_projective(&self.matrix, mx, my);
+        Some((sx as f32, sy as f32))
+    }
+
+    fn clone_boxed(&self) -> Box<dyn DimensionEffect> {
+        Box::new(self.clone())
+    }
+}
+
+/// Compute output dimensions for a 3×3 projective warp.
+///
+/// Maps the 4 output corners through the matrix M to get the source quad,
+/// then computes edge lengths of the source quad to determine the local
+/// sampling density in each direction. The policy picks output dims from
+/// the per-axis scale factors.
+///
+/// # Arguments
+/// - `w`, `h`: input (and reference output) dimensions
+/// - `m`: 3×3 matrix (row-major), maps output → source
+/// - `policy`: how to choose output resolution
+pub fn warp_output_dims(w: u32, h: u32, m: &[f64; 9], policy: ResolutionPolicy) -> (u32, u32) {
+    if w == 0 || h == 0 {
+        return (0, 0);
+    }
+    match policy {
+        ResolutionPolicy::PreserveInput => (w, h),
+        ResolutionPolicy::Custom(cw, ch) => (cw, ch),
+        _ => {
+            let fw = w as f64;
+            let fh = h as f64;
+
+            // Map the 4 output corners through M to get source corners.
+            let src_tl = apply_projective(m, 0.0, 0.0);
+            let src_tr = apply_projective(m, fw, 0.0);
+            let src_br = apply_projective(m, fw, fh);
+            let src_bl = apply_projective(m, 0.0, fh);
+
+            // Source quad edge lengths (Euclidean distance).
+            let top = dist_f64(src_tl, src_tr);
+            let bottom = dist_f64(src_bl, src_br);
+            let left = dist_f64(src_tl, src_bl);
+            let right = dist_f64(src_tr, src_br);
+
+            // Per-axis scale: ratio of source edge length to output edge length.
+            // A scale > 1 means more source pixels than output pixels (downsampled).
+            // A scale < 1 means fewer source pixels (upsampled → blur).
+            let h_scales = (top / fw, bottom / fw);
+            let v_scales = (left / fh, right / fh);
+
+            let (h_scale, v_scale) = match policy {
+                ResolutionPolicy::MatchNarrow => {
+                    (h_scales.0.min(h_scales.1), v_scales.0.min(v_scales.1))
+                }
+                ResolutionPolicy::MatchWide => {
+                    (h_scales.0.max(h_scales.1), v_scales.0.max(v_scales.1))
+                }
+                ResolutionPolicy::MatchArea => (
+                    (h_scales.0 * h_scales.1).sqrt(),
+                    (v_scales.0 * v_scales.1).sqrt(),
+                ),
+                _ => unreachable!(),
+            };
+
+            let out_w = (fw * h_scale).round().max(1.0) as u32;
+            let out_h = (fh * v_scale).round().max(1.0) as u32;
+            (out_w, out_h)
+        }
+    }
+}
+
+/// Inverse of warp output dims: what source dimensions produce `(out_w, out_h)`
+/// after the warp with the given policy.
+///
+/// For `PreserveInput` and `Custom`, this is trivial. For scale-based policies,
+/// we invert the scale factors.
+fn warp_inverse_dims(
+    out_w: u32,
+    out_h: u32,
+    m: &[f64; 9],
+    policy: ResolutionPolicy,
+) -> Option<(u32, u32)> {
+    match policy {
+        ResolutionPolicy::PreserveInput => Some((out_w, out_h)),
+        ResolutionPolicy::Custom(_, _) => {
+            // Custom output is independent of input — can't recover input from output.
+            None
+        }
+        _ => {
+            // For scale-based policies, forward(w, h) = (w * sx, h * sy).
+            // To invert: w = out_w / sx, h = out_h / sy.
+            // But sx and sy depend on w and h (the matrix is defined relative to input dims).
+            // Use out_w, out_h as the initial reference dims for the scale computation
+            // (since forward preserves aspect ratio approximately).
+            let fw = out_w as f64;
+            let fh = out_h as f64;
+
+            let src_tl = apply_projective(m, 0.0, 0.0);
+            let src_tr = apply_projective(m, fw, 0.0);
+            let src_br = apply_projective(m, fw, fh);
+            let src_bl = apply_projective(m, 0.0, fh);
+
+            let top = dist_f64(src_tl, src_tr);
+            let bottom = dist_f64(src_bl, src_br);
+            let left = dist_f64(src_tl, src_bl);
+            let right = dist_f64(src_tr, src_br);
+
+            let h_scales = (top / fw, bottom / fw);
+            let v_scales = (left / fh, right / fh);
+
+            let (h_scale, v_scale) = match policy {
+                ResolutionPolicy::MatchNarrow => {
+                    (h_scales.0.min(h_scales.1), v_scales.0.min(v_scales.1))
+                }
+                ResolutionPolicy::MatchWide => {
+                    (h_scales.0.max(h_scales.1), v_scales.0.max(v_scales.1))
+                }
+                ResolutionPolicy::MatchArea => (
+                    (h_scales.0 * h_scales.1).sqrt(),
+                    (v_scales.0 * v_scales.1).sqrt(),
+                ),
+                _ => unreachable!(),
+            };
+
+            if h_scale < 1e-9 || v_scale < 1e-9 {
+                return None;
+            }
+            Some((
+                (fw / h_scale).round().max(1.0) as u32,
+                (fh / v_scale).round().max(1.0) as u32,
+            ))
+        }
+    }
+}
+
+// ── 3×3 matrix helpers ──
+
+/// Apply a 3×3 projective matrix to a point, returning (x, y) after division.
+fn apply_projective(m: &[f64; 9], x: f64, y: f64) -> (f64, f64) {
+    let w = m[6] * x + m[7] * y + m[8];
+    if w.abs() < 1e-12 {
+        return (0.0, 0.0); // degenerate
+    }
+    (
+        (m[0] * x + m[1] * y + m[2]) / w,
+        (m[3] * x + m[4] * y + m[5]) / w,
+    )
+}
+
+/// Invert a 3×3 matrix. Returns `None` if singular.
+fn invert_3x3(m: &[f64; 9]) -> Option<[f64; 9]> {
+    let det = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6])
+        + m[2] * (m[3] * m[7] - m[4] * m[6]);
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let inv_det = 1.0 / det;
+    Some([
+        (m[4] * m[8] - m[5] * m[7]) * inv_det,
+        (m[2] * m[7] - m[1] * m[8]) * inv_det,
+        (m[1] * m[5] - m[2] * m[4]) * inv_det,
+        (m[5] * m[6] - m[3] * m[8]) * inv_det,
+        (m[0] * m[8] - m[2] * m[6]) * inv_det,
+        (m[2] * m[3] - m[0] * m[5]) * inv_det,
+        (m[3] * m[7] - m[4] * m[6]) * inv_det,
+        (m[1] * m[6] - m[0] * m[7]) * inv_det,
+        (m[0] * m[4] - m[1] * m[3]) * inv_det,
+    ])
+}
+
+/// Euclidean distance between two points.
+fn dist_f64(a: (f64, f64), b: (f64, f64)) -> f64 {
+    ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
+}
+
+// ── Pure math functions (rotation) ──
 //
 // All computation runs in f64 for sub-pixel precision and consistent
 // rounding. Forward uses floor; inverse uses ceil and then iterates to
@@ -1219,5 +1501,224 @@ mod tests {
         let expected = (1000.0 * 2.0_f64.sqrt()).ceil() as u32;
         assert_eq!(w, expected);
         assert_eq!(h, expected);
+    }
+
+    // ── WarpEffect tests ──
+
+    /// Identity matrix → all policies give input dims.
+    #[test]
+    fn warp_identity_preserves_dims() {
+        let identity = [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        for policy in [
+            ResolutionPolicy::MatchNarrow,
+            ResolutionPolicy::MatchWide,
+            ResolutionPolicy::MatchArea,
+            ResolutionPolicy::PreserveInput,
+        ] {
+            let effect = WarpEffect::new(identity, policy);
+            assert_eq!(
+                effect.forward(1920, 1080).unwrap(),
+                (1920, 1080),
+                "identity + {policy:?} should preserve dims"
+            );
+        }
+    }
+
+    /// Custom policy returns the specified dims regardless of matrix.
+    #[test]
+    fn warp_custom_policy() {
+        let identity = [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let effect = WarpEffect::new(identity, ResolutionPolicy::Custom(800, 600));
+        assert_eq!(effect.forward(1920, 1080).unwrap(), (800, 600));
+    }
+
+    /// Uniform 2× scale matrix → output is 2× input.
+    #[test]
+    fn warp_uniform_scale() {
+        // M maps output(x,y) → source(2x, 2y): each output pixel covers 2×2 source.
+        let m = [2.0f32, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 1.0];
+        let effect = WarpEffect::new(m, ResolutionPolicy::MatchArea);
+        let (w, h) = effect.forward(1000, 800).unwrap();
+        // Source quad edges are 2× output edges, so scale factor ≈ 2.
+        assert!((w as f64 - 2000.0).abs() < 2.0, "w={w} expected ~2000");
+        assert!((h as f64 - 1600.0).abs() < 2.0, "h={h} expected ~1600");
+    }
+
+    /// Perspective trapezoid: near edge wider than far edge.
+    /// MatchNarrow should give smaller output than MatchWide.
+    #[test]
+    fn warp_perspective_narrow_vs_wide() {
+        // Build a matrix that maps a rectangle to a trapezoid:
+        // Top edge (far): 600px of source content
+        // Bottom edge (near): 1000px of source content
+        // This simulates looking down at a document.
+        let src = [
+            (200.0f64, 0.0),
+            (800.0, 0.0),
+            (1000.0, 1000.0),
+            (0.0, 1000.0),
+        ];
+        let dst = [
+            (0.0f64, 0.0),
+            (1000.0, 0.0),
+            (1000.0, 1000.0),
+            (0.0, 1000.0),
+        ];
+
+        // Compute homography (dst→src) using the same DLT as zenfilters.
+        let m = compute_test_homography(&src, &dst).expect("non-degenerate");
+
+        let narrow = WarpEffect::new_f64(m, ResolutionPolicy::MatchNarrow);
+        let wide = WarpEffect::new_f64(m, ResolutionPolicy::MatchWide);
+        let area = WarpEffect::new_f64(m, ResolutionPolicy::MatchArea);
+
+        let (nw, _nh) = narrow.forward(1000, 1000).unwrap();
+        let (ww, _wh) = wide.forward(1000, 1000).unwrap();
+        let (aw, _ah) = area.forward(1000, 1000).unwrap();
+
+        assert!(
+            nw < ww,
+            "MatchNarrow width ({nw}) should be < MatchWide width ({ww})"
+        );
+        assert!(
+            aw > nw && aw < ww,
+            "MatchArea width ({aw}) should be between narrow ({nw}) and wide ({ww})"
+        );
+
+        // MatchNarrow: top edge is 600px of source in 1000px output → scale = 0.6.
+        // So output should be ~600px wide.
+        assert!(
+            (nw as f64 - 600.0).abs() < 50.0,
+            "MatchNarrow width {nw} should be near 600"
+        );
+        // MatchWide: bottom edge is 1000px → scale = 1.0 → output = 1000px.
+        assert!(
+            (ww as f64 - 1000.0).abs() < 50.0,
+            "MatchWide width {ww} should be near 1000"
+        );
+    }
+
+    /// WarpEffect point roundtrip: forward_point ∘ inverse_point ≈ identity.
+    #[test]
+    fn warp_point_roundtrip() {
+        // Slight rotation matrix (5° around center of 1000×800).
+        let angle = 5.0f64 * core::f64::consts::PI / 180.0;
+        let cos = angle.cos();
+        let sin = angle.sin();
+        let cx = 499.5;
+        let cy = 399.5;
+        let m = [
+            cos,
+            sin,
+            cx - cx * cos - cy * sin,
+            -sin,
+            cos,
+            cy + cx * sin - cy * cos,
+            0.0,
+            0.0,
+            1.0,
+        ];
+        let effect = WarpEffect::new_f64(m, ResolutionPolicy::PreserveInput);
+        let pts = [
+            (500.0f32, 400.0),
+            (100.0, 200.0),
+            (900.0, 50.0),
+            (0.0, 799.0),
+        ];
+        for p in pts {
+            let q = effect.forward_point(p.0, p.1, 1000, 800).unwrap();
+            let back = effect.inverse_point(q.0, q.1, 1000, 800).unwrap();
+            let d = dist(back, p);
+            assert!(
+                d < 0.1,
+                "warp point roundtrip: p={p:?} → q={q:?} → back={back:?} dist={d}"
+            );
+        }
+    }
+
+    /// WarpEffect with PreserveInput + identity = RotateEffect with CropToOriginal.
+    #[test]
+    fn warp_rotation_matches_rotate_effect() {
+        // Pure rotation, PreserveInput policy → same dims as CropToOriginal.
+        let angle_deg = 15.0f32;
+        let angle_rad = angle_deg * core::f32::consts::PI / 180.0;
+        let cos = angle_rad.cos() as f64;
+        let sin = angle_rad.sin() as f64;
+        let cx = 499.5;
+        let cy = 399.5;
+        let m = [
+            cos,
+            sin,
+            cx - cx * cos - cy * sin,
+            -sin,
+            cos,
+            cy + cx * sin - cy * cos,
+            0.0,
+            0.0,
+            1.0,
+        ];
+
+        let warp = WarpEffect::new_f64(m, ResolutionPolicy::PreserveInput);
+        let rotate = RotateEffect::from_degrees(angle_deg, RotateMode::CropToOriginal);
+
+        assert_eq!(
+            warp.forward(1000, 800).unwrap(),
+            rotate.forward(1000, 800).unwrap(),
+            "WarpEffect(PreserveInput) should match RotateEffect(CropToOriginal)"
+        );
+    }
+
+    /// Helper: compute 3×3 homography from 4 point correspondences (DLT).
+    /// Mirrors zenfilters' compute_homography but in f64 for test precision.
+    fn compute_test_homography(src: &[(f64, f64); 4], dst: &[(f64, f64); 4]) -> Option<[f64; 9]> {
+        let mut a = [[0.0f64; 9]; 8];
+        for i in 0..4 {
+            let (xs, ys) = src[i];
+            let (xd, yd) = dst[i];
+            let r0 = i * 2;
+            let r1 = i * 2 + 1;
+            a[r0][0] = xd;
+            a[r0][1] = yd;
+            a[r0][2] = 1.0;
+            a[r0][6] = -xd * xs;
+            a[r0][7] = -yd * xs;
+            a[r0][8] = xs;
+            a[r1][3] = xd;
+            a[r1][4] = yd;
+            a[r1][5] = 1.0;
+            a[r1][6] = -xd * ys;
+            a[r1][7] = -yd * ys;
+            a[r1][8] = ys;
+        }
+        for col in 0..8 {
+            let mut max_row = col;
+            let mut max_val = a[col][col].abs();
+            for row in (col + 1)..8 {
+                if a[row][col].abs() > max_val {
+                    max_val = a[row][col].abs();
+                    max_row = row;
+                }
+            }
+            if max_val < 1e-12 {
+                return None;
+            }
+            a.swap(col, max_row);
+            let pivot = a[col][col];
+            for row in (col + 1)..8 {
+                let f = a[row][col] / pivot;
+                for c in col..9 {
+                    a[row][c] -= f * a[col][c];
+                }
+            }
+        }
+        let mut h = [0.0f64; 8];
+        for col in (0..8).rev() {
+            let mut s = a[col][8];
+            for c in (col + 1)..8 {
+                s -= a[col][c] * h[c];
+            }
+            h[col] = s / a[col][col];
+        }
+        Some([h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1.0])
     }
 }
