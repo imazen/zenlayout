@@ -1693,9 +1693,9 @@ mod tests {
         for col in 0..8 {
             let mut max_row = col;
             let mut max_val = a[col][col].abs();
-            for row in (col + 1)..8 {
-                if a[row][col].abs() > max_val {
-                    max_val = a[row][col].abs();
+            for (row, a_row) in a.iter().enumerate().skip(col + 1) {
+                if a_row[col].abs() > max_val {
+                    max_val = a_row[col].abs();
                     max_row = row;
                 }
             }
@@ -1704,10 +1704,11 @@ mod tests {
             }
             a.swap(col, max_row);
             let pivot = a[col][col];
-            for row in (col + 1)..8 {
-                let f = a[row][col] / pivot;
-                for c in col..9 {
-                    a[row][c] -= f * a[col][c];
+            let src = a[col];
+            for a_row in a.iter_mut().skip(col + 1) {
+                let f = a_row[col] / pivot;
+                for (dst, s) in a_row.iter_mut().zip(src.iter()).skip(col) {
+                    *dst -= f * s;
                 }
             }
         }
