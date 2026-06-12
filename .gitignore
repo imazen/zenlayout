@@ -57,3 +57,6 @@ Cargo.toml.original.txt
 *.profraw
 *.profdata
 fuzz-*.log
+
+# agent coordination marker — never committed
+.workongoing
